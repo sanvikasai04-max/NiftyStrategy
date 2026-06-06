@@ -46,6 +46,17 @@ minVolumeMult = input.float(0.9, title="Min Volume Multiplier", minval=0.0, step
 entryOnRejectionBreak = input.bool(false, title="Require Close Near Rejection Break")
 closeBreakRangePct = input.float(0.25, title="Close Break Range %", minval=0.0, maxval=1.0, step=0.05)
 
+useSmcSetup = input.bool(false, title="Use SMC AMD/CHOCH/FVG/OB Setup")
+amdLookback = input.int(20, title="AMD Accumulation Lookback", minval=2)
+amdMaxRangePoints = input.float(120.0, title="AMD Max Range Points", minval=0.1, step=0.5)
+smcSweepLookback = input.int(8, title="SMC Sweep Lookback", minval=1)
+smcSweepBuffer = input.float(0.0, title="SMC Sweep Buffer Points", minval=0.0, step=0.5)
+chochLookback = input.int(5, title="CHOCH Lookback", minval=2)
+chochBuffer = input.float(0.0, title="CHOCH Buffer Points", minval=0.0, step=0.5)
+fvgLookback = input.int(5, title="FVG Lookback", minval=1)
+obBuffer = input.float(2.0, title="OB Retest Buffer Points", minval=0.0, step=0.5)
+requireFvgOrOb = input.bool(true, title="Require FVG or OB Confirmation")
+
 useChopFilter = input.bool(true, title="Avoid EMA Overlap Chop")
 chopLookback = input.int(10, title="Chop Lookback Bars", minval=2)
 chopMinEmaOverlaps = input.int(2, title="Chop Min EMA Overlaps", minval=2, maxval=3)
@@ -89,6 +100,28 @@ lowerWick = math.min(open, close) - low
 upperWick = high - math.max(open, close)
 bullishEngulfing = close > open and close[1] < open[1] and open <= close[1] and close >= open[1]
 bearishEngulfing = close < open and close[1] > open[1] and open >= close[1] and close <= open[1]
+
+amdRangeHigh = ta.highest(high[1], amdLookback)
+amdRangeLow = ta.lowest(low[1], amdLookback)
+amdRangeWidth = amdRangeHigh - amdRangeLow
+sweepDown = low < amdRangeLow - smcSweepBuffer and close > amdRangeLow
+sweepUp = high > amdRangeHigh + smcSweepBuffer and close < amdRangeHigh
+recentSweepDown = math.sum(sweepDown[1] ? 1 : 0, smcSweepLookback) > 0
+recentSweepUp = math.sum(sweepUp[1] ? 1 : 0, smcSweepLookback) > 0
+chochHigh = ta.highest(high[1], chochLookback)
+chochLow = ta.lowest(low[1], chochLookback)
+bullishChoch = close > chochHigh + chochBuffer
+bearishChoch = close < chochLow - chochBuffer
+bullishFvg = low > high[2]
+bearishFvg = high < low[2]
+recentBullishFvg = math.sum(bullishFvg[1] ? 1 : 0, fvgLookback) > 0
+recentBearishFvg = math.sum(bearishFvg[1] ? 1 : 0, fvgLookback) > 0
+lastBearHigh = ta.valuewhen(close < open, high, 1)
+lastBearLow = ta.valuewhen(close < open, low, 1)
+lastBullHigh = ta.valuewhen(close > open, high, 1)
+lastBullLow = ta.valuewhen(close > open, low, 1)
+bullishObRetest = not na(lastBearHigh) and low <= lastBearHigh + obBuffer and close >= lastBearLow
+bearishObRetest = not na(lastBullLow) and high >= lastBullLow - obBuffer and close <= lastBullHigh
 
 plot(emaFast, color=color.rgb(30, 105, 220), linewidth=2, title="EMA 14")
 plot(emaMid, color=color.rgb(210, 140, 40), linewidth=2, title="EMA 34")
@@ -136,8 +169,17 @@ sellBreakOK = not entryOnRejectionBreak or close < low + candleRange * closeBrea
 buyPriceActionOK = buyRejectionOK or buyLowRiskRetestOK
 sellPriceActionOK = sellRejectionOK or sellLowRiskRetestOK
 
-buySignal = allowLong and buyStack and buyBounce and buyCandleOK and buyBreakOK and buyPriceActionOK and distanceOK and chopOK and buySlopeOK and ribbonOK and volumeOK
-sellSignal = allowShort and sellStack and sellBounce and sellCandleOK and sellBreakOK and sellPriceActionOK and distanceOK and chopOK and sellSlopeOK and ribbonOK and volumeOK
+emaBuySignal = allowLong and buyStack and buyBounce and buyCandleOK and buyBreakOK and buyPriceActionOK and distanceOK and chopOK and buySlopeOK and ribbonOK and volumeOK
+emaSellSignal = allowShort and sellStack and sellBounce and sellCandleOK and sellBreakOK and sellPriceActionOK and distanceOK and chopOK and sellSlopeOK and ribbonOK and volumeOK
+
+accumulationOK = amdRangeWidth <= amdMaxRangePoints
+smcBuyConfirm = recentBullishFvg or bullishObRetest or not requireFvgOrOb
+smcSellConfirm = recentBearishFvg or bearishObRetest or not requireFvgOrOb
+smcBuySignal = useSmcSetup and allowLong and accumulationOK and recentSweepDown and bullishChoch and buyCandleOK and smcBuyConfirm and chopOK and buySlopeOK and ribbonOK and volumeOK
+smcSellSignal = useSmcSetup and allowShort and accumulationOK and recentSweepUp and bearishChoch and sellCandleOK and smcSellConfirm and chopOK and sellSlopeOK and ribbonOK and volumeOK
+
+buySignal = emaBuySignal or smcBuySignal
+sellSignal = emaSellSignal or smcSellSignal
 
 buyEntry = buySignal[1] and inEntrySession and strategy.position_size == 0
 sellEntry = sellSignal[1] and inEntrySession and strategy.position_size == 0
@@ -173,7 +215,8 @@ if buyEntry
         bestMove := 0.0
         strategy.entry("EMA BUY", strategy.long)
         if showLabels
-            label.new(bar_index, low - labelOffset, "BUY\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_up, color=color.rgb(70, 150, 95), textcolor=color.white, size=size.small)
+            setupText = emaBuySignal[1] ? "EMA BUY" : "SMC BUY"
+            label.new(bar_index, low - labelOffset, setupText + "\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_up, color=color.rgb(70, 150, 95), textcolor=color.white, size=size.small)
 
 if sellEntry
     risk = sellSelectedSL - open
@@ -186,7 +229,8 @@ if sellEntry
         bestMove := 0.0
         strategy.entry("EMA SELL", strategy.short)
         if showLabels
-            label.new(bar_index, high + labelOffset, "SELL\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_down, color=color.rgb(190, 75, 75), textcolor=color.white, size=size.small)
+            setupText = emaSellSignal[1] ? "EMA SELL" : "SMC SELL"
+            label.new(bar_index, high + labelOffset, setupText + "\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_down, color=color.rgb(190, 75, 75), textcolor=color.white, size=size.small)
 
 if strategy.position_size > 0
     bestMove := na(bestMove) ? high - activeEntry : math.max(bestMove, high - activeEntry)

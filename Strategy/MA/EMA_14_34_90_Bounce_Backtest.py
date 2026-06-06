@@ -100,6 +100,27 @@ def add_indicators(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
     out["bullish_engulfing"] = (out["close"] > out["open"]) & (prev_close < prev_open) & (out["open"] <= prev_close) & (out["close"] >= prev_open)
     out["bearish_engulfing"] = (out["close"] < out["open"]) & (prev_close > prev_open) & (out["open"] >= prev_close) & (out["close"] <= prev_open)
     out["distance_from_fast"] = (out["close"] - out["ema_fast"]).abs()
+    out["amd_range_high"] = out["high"].shift(1).rolling(args.amd_lookback).max()
+    out["amd_range_low"] = out["low"].shift(1).rolling(args.amd_lookback).min()
+    out["amd_range_width"] = out["amd_range_high"] - out["amd_range_low"]
+    out["sweep_down"] = (out["low"] < out["amd_range_low"] - args.smc_sweep_buffer) & (out["close"] > out["amd_range_low"])
+    out["sweep_up"] = (out["high"] > out["amd_range_high"] + args.smc_sweep_buffer) & (out["close"] < out["amd_range_high"])
+    out["recent_sweep_down"] = out["sweep_down"].shift(1).rolling(args.smc_sweep_lookback).max()
+    out["recent_sweep_up"] = out["sweep_up"].shift(1).rolling(args.smc_sweep_lookback).max()
+    out["choch_high"] = out["high"].shift(1).rolling(args.choch_lookback).max()
+    out["choch_low"] = out["low"].shift(1).rolling(args.choch_lookback).min()
+    out["bullish_choch"] = out["close"] > out["choch_high"] + args.choch_buffer
+    out["bearish_choch"] = out["close"] < out["choch_low"] - args.choch_buffer
+    out["bullish_fvg"] = out["low"] > out["high"].shift(2)
+    out["bearish_fvg"] = out["high"] < out["low"].shift(2)
+    out["recent_bullish_fvg"] = out["bullish_fvg"].shift(1).rolling(args.fvg_lookback).max()
+    out["recent_bearish_fvg"] = out["bearish_fvg"].shift(1).rolling(args.fvg_lookback).max()
+    last_bear_high = out["high"].where(out["close"] < out["open"]).ffill().shift(1)
+    last_bear_low = out["low"].where(out["close"] < out["open"]).ffill().shift(1)
+    last_bull_high = out["high"].where(out["close"] > out["open"]).ffill().shift(1)
+    last_bull_low = out["low"].where(out["close"] > out["open"]).ffill().shift(1)
+    out["bullish_ob_retest"] = (out["low"] <= last_bear_high + args.ob_buffer) & (out["close"] >= last_bear_low)
+    out["bearish_ob_retest"] = (out["high"] >= last_bull_low - args.ob_buffer) & (out["close"] <= last_bull_high)
     return out
 
 
@@ -251,6 +272,34 @@ def signal_on_bar(row: pd.Series, args: argparse.Namespace, side: str) -> bool:
     return bool(stack_ok and bounce_ok and candle_ok and break_ok and price_action_ok)
 
 
+def smc_signal_on_bar(row: pd.Series, args: argparse.Namespace, side: str) -> bool:
+    if not args.use_smc_setup:
+        return False
+    if pd.isna(row.amd_range_width) or pd.isna(row.choch_high) or pd.isna(row.choch_low):
+        return False
+    if args.use_chop_filter and not bool(row.chop_ok):
+        return False
+    if not trend_quality_ok(row, args, side):
+        return False
+
+    accumulation_ok = row.amd_range_width <= args.amd_max_range_points
+    if not bool(accumulation_ok):
+        return False
+
+    if side == "BUY":
+        manipulation_ok = bool(row.recent_sweep_down)
+        choch_ok = bool(row.bullish_choch)
+        fvg_ob_ok = bool(row.recent_bullish_fvg) or bool(row.bullish_ob_retest)
+        candle_ok = not args.require_candle_direction or row.close > row.open
+        return bool(manipulation_ok and choch_ok and candle_ok and (fvg_ob_ok or not args.require_fvg_or_ob))
+
+    manipulation_ok = bool(row.recent_sweep_up)
+    choch_ok = bool(row.bearish_choch)
+    fvg_ob_ok = bool(row.recent_bearish_fvg) or bool(row.bearish_ob_retest)
+    candle_ok = not args.require_candle_direction or row.close < row.open
+    return bool(manipulation_ok and choch_ok and candle_ok and (fvg_ob_ok or not args.require_fvg_or_ob))
+
+
 def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
     df = add_indicators(load_data(path), args)
     df["ema_overlap_count"] = (
@@ -333,8 +382,12 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             continue
 
         prev = df.iloc[i - 1]
-        buy_setup = signal_on_bar(prev, args, "BUY")
-        sell_setup = signal_on_bar(prev, args, "SELL")
+        buy_ema_setup = signal_on_bar(prev, args, "BUY")
+        sell_ema_setup = signal_on_bar(prev, args, "SELL")
+        buy_smc_setup = smc_signal_on_bar(prev, args, "BUY")
+        sell_smc_setup = smc_signal_on_bar(prev, args, "SELL")
+        buy_setup = buy_ema_setup or buy_smc_setup
+        sell_setup = sell_ema_setup or sell_smc_setup
 
         if buy_setup:
             counts["buy_signals"] += 1
@@ -352,6 +405,7 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             continue
 
         if buy_setup and args.side in {"both", "buy"}:
+            setup_name = "EMA" if buy_ema_setup else "SMC"
             entry = row.open if args.entry_price == "open" else row.close
             sl = selected_stop("BUY", entry, row, prev, swing_window, args)
             risk = entry - sl
@@ -364,8 +418,10 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             entry_bar = i
             best_move = 0.0
             counts["buy_entries"] += 1
-            open_trade = {"timeframe": timeframe, "side": side, "entry_time": ts, "entry": entry, "initial_sl": sl, "target": tp, "risk": risk, "ema_fast": row.ema_fast, "ema_mid": row.ema_mid, "ema_slow": row.ema_slow, "reason": "EMA34 dynamic support retest with bullish rejection"}
+            reason = "EMA34 dynamic support retest with bullish rejection" if setup_name == "EMA" else "AMD sweep + bullish CHOCH with FVG/OB confirmation"
+            open_trade = {"timeframe": timeframe, "setup": setup_name, "side": side, "entry_time": ts, "entry": entry, "initial_sl": sl, "target": tp, "risk": risk, "ema_fast": row.ema_fast, "ema_mid": row.ema_mid, "ema_slow": row.ema_slow, "reason": reason}
         elif sell_setup and args.side in {"both", "sell"}:
+            setup_name = "EMA" if sell_ema_setup else "SMC"
             entry = row.open if args.entry_price == "open" else row.close
             sl = selected_stop("SELL", entry, row, prev, swing_window, args)
             risk = sl - entry
@@ -378,7 +434,8 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             entry_bar = i
             best_move = 0.0
             counts["sell_entries"] += 1
-            open_trade = {"timeframe": timeframe, "side": side, "entry_time": ts, "entry": entry, "initial_sl": sl, "target": tp, "risk": risk, "ema_fast": row.ema_fast, "ema_mid": row.ema_mid, "ema_slow": row.ema_slow, "reason": "EMA34 dynamic resistance retest with bearish rejection"}
+            reason = "EMA34 dynamic resistance retest with bearish rejection" if setup_name == "EMA" else "AMD sweep + bearish CHOCH with FVG/OB confirmation"
+            open_trade = {"timeframe": timeframe, "setup": setup_name, "side": side, "entry_time": ts, "entry": entry, "initial_sl": sl, "target": tp, "risk": risk, "ema_fast": row.ema_fast, "ema_mid": row.ema_mid, "ema_slow": row.ema_slow, "reason": reason}
 
     return df, pd.DataFrame(trades), counts
 
@@ -453,7 +510,7 @@ def trade_rows(trades: pd.DataFrame, recent: int, best: bool = False) -> list[di
     rows = []
     data = trades.sort_values(["pnl", "profit_risk_multiple"], ascending=[False, False]).head(recent) if best else trades.sort_values("exit_time").tail(recent)
     for row in data.itertuples():
-        rows.append({"Side": row.side, "EntryTime": row.entry_time, "Entry": row.entry, "RiskPts": row.risk, "SL": row.initial_sl, "Target": row.target, "BestMovePts": row.best_move, "ExitTime": row.exit_time, "Exit": row.exit, "PnL": row.pnl, "ProfitRiskMultiple": row.profit_risk_multiple, "Bars": row.bars, "ExitType": row.exit_type})
+        rows.append({"Setup": row.setup, "Side": row.side, "EntryTime": row.entry_time, "Entry": row.entry, "RiskPts": row.risk, "SL": row.initial_sl, "Target": row.target, "BestMovePts": row.best_move, "ExitTime": row.exit_time, "Exit": row.exit, "PnL": row.pnl, "ProfitRiskMultiple": row.profit_risk_multiple, "Bars": row.bars, "ExitType": row.exit_type})
     return rows
 
 
@@ -481,6 +538,15 @@ def config_rows(args: argparse.Namespace) -> list[dict[str, object]]:
         {"Setting": "Volume Filter", "Value": args.use_volume_filter},
         {"Setting": "Min Volume Mult", "Value": args.min_volume_mult},
         {"Setting": "Close Break Filter", "Value": args.entry_on_rejection_break},
+        {"Setting": "SMC Setup", "Value": args.use_smc_setup},
+        {"Setting": "AMD Lookback", "Value": args.amd_lookback},
+        {"Setting": "AMD Max Range Points", "Value": args.amd_max_range_points},
+        {"Setting": "SMC Sweep Lookback", "Value": args.smc_sweep_lookback},
+        {"Setting": "SMC Sweep Buffer", "Value": args.smc_sweep_buffer},
+        {"Setting": "CHOCH Lookback", "Value": args.choch_lookback},
+        {"Setting": "CHOCH Buffer", "Value": args.choch_buffer},
+        {"Setting": "FVG Lookback", "Value": args.fvg_lookback},
+        {"Setting": "Require FVG/OB", "Value": args.require_fvg_or_ob},
         {"Setting": "Chop Filter", "Value": args.use_chop_filter},
         {"Setting": "Chop Lookback", "Value": args.chop_lookback},
         {"Setting": "Chop Min EMA Overlaps", "Value": args.chop_min_ema_overlaps},
@@ -512,6 +578,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"Data: {df.datetime.min()} -> {df.datetime.max()} | bars={len(df)}")
         print(f"Signals: buy={counts['buy_signals']} sell={counts['sell_signals']} | Entries: buy={counts['buy_entries']} sell={counts['sell_entries']} | Ignored={counts['ignored']}")
         if not trades.empty:
+            print_table(f"{timeframe} By Setup", group_rows(trades, "setup", "Setup"))
             print_table(f"{timeframe} By Side", group_rows(trades, "side", "Side"))
             print_table(f"{timeframe} By Entry Hour", group_rows(trades.assign(hour=trades["entry_time"].dt.hour), "hour", "Hour"))
             print_table(f"{timeframe} Best Trades", trade_rows(trades, args.best_trades, best=True))
@@ -561,6 +628,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-volume-mult", type=float, default=0.9)
     parser.add_argument("--entry-on-rejection-break", type=bool_arg, default=False)
     parser.add_argument("--close-break-range-pct", type=float, default=0.25)
+    parser.add_argument("--use-smc-setup", type=bool_arg, default=False)
+    parser.add_argument("--amd-lookback", type=int, default=20)
+    parser.add_argument("--amd-max-range-points", type=float, default=120.0)
+    parser.add_argument("--smc-sweep-lookback", type=int, default=8)
+    parser.add_argument("--smc-sweep-buffer", type=float, default=0.0)
+    parser.add_argument("--choch-lookback", type=int, default=5)
+    parser.add_argument("--choch-buffer", type=float, default=0.0)
+    parser.add_argument("--fvg-lookback", type=int, default=5)
+    parser.add_argument("--ob-buffer", type=float, default=2.0)
+    parser.add_argument("--require-fvg-or-ob", type=bool_arg, default=True)
     parser.add_argument("--use-bos-filter", type=bool_arg, default=False, help=argparse.SUPPRESS)
     parser.add_argument("--bos-lookback", type=int, default=5, help=argparse.SUPPRESS)
     parser.add_argument("--use-chop-filter", type=bool_arg, default=True)
