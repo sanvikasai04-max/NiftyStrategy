@@ -1,0 +1,5 @@
+Nifty50_FullData/
+Nifty50_FullData.zip
+*.pyc
+__pycache__/
+ema_14_34_90_trades_*.csv
