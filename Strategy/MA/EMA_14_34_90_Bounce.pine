@@ -1,0 +1,143 @@
+//@version=5
+strategy("SHIVA EMA 14/34/90 Bounce Strategy", overlay=true, max_labels_count=500, max_lines_count=500, initial_capital=100000, pyramiding=0, process_orders_on_close=false)
+
+// =====================================================
+// INPUTS
+// =====================================================
+
+emaFastLen = input.int(14, title="Fast EMA", minval=1)
+emaMidLen = input.int(34, title="Bounce EMA", minval=1)
+emaSlowLen = input.int(90, title="Trend EMA", minval=1)
+
+allowLong = input.bool(true, title="Allow Long")
+allowShort = input.bool(true, title="Allow Short")
+targetPoints = input.float(50.0, title="Target Points", minval=0.1, step=0.5)
+
+swingLookback = input.int(5, title="Swing SL Lookback", minval=1)
+stopLossMode = input.string("Signal Candle", title="Stop Loss Mode", options=["Signal Candle", "Fixed Points", "Swing", "ATR", "EMA 34"])
+fixedStopPoints = input.float(10.0, title="Fixed Stop Points", minval=0.1, step=0.5)
+atrStopLen = input.int(14, title="ATR Stop Length", minval=1)
+atrStopMult = input.float(1.0, title="ATR Stop Multiplier", minval=0.1, step=0.1)
+slBufferPoints = input.float(0.0, title="SL Buffer Points", minval=0.0, step=0.05)
+
+maxDistanceFromFast = input.float(15.0, title="Max Distance From EMA 14", minval=0.1, step=0.5)
+bounceBufferPoints = input.float(2.0, title="EMA 34 Bounce Buffer Points", minval=0.0, step=0.5)
+requireCandleDirection = input.bool(true, title="Require Candle Direction")
+useBosFilter = input.bool(true, title="Use BOS Confirmation")
+bosLookback = input.int(5, title="BOS Lookback Bars", minval=2)
+useChopFilter = input.bool(true, title="Avoid EMA Overlap Chop")
+chopLookback = input.int(10, title="Chop Lookback Bars", minval=2)
+chopMinEmaOverlaps = input.int(2, title="Chop Min EMA Overlaps", minval=2, maxval=3)
+maxChopOverlapBars = input.int(3, title="Max Choppy Overlap Bars", minval=0)
+
+useSessionFilter = input.bool(true, title="Use Entry Session")
+entryStartHour = input.int(9, title="Entry Start Hour", minval=0, maxval=23)
+entryStartMinute = input.int(30, title="Entry Start Minute", minval=0, maxval=59)
+entryEndHour = input.int(14, title="Entry End Hour", minval=0, maxval=23)
+entryEndMinute = input.int(45, title="Entry End Minute", minval=0, maxval=59)
+forceExitHour = input.int(15, title="Force Exit Hour", minval=0, maxval=23)
+forceExitMinute = input.int(15, title="Force Exit Minute", minval=0, maxval=59)
+
+showLabels = input.bool(true, title="Show Trade Labels")
+labelOffsetAtrLen = input.int(14, title="Label Offset ATR Length", minval=1)
+labelOffsetAtrMult = input.float(0.35, title="Label Offset ATR Multiplier", minval=0.0, step=0.05)
+labelOffsetMinTicks = input.int(20, title="Label Offset Minimum Ticks", minval=0)
+
+// =====================================================
+// CORE
+// =====================================================
+
+emaFast = ta.ema(close, emaFastLen)
+emaMid = ta.ema(close, emaMidLen)
+emaSlow = ta.ema(close, emaSlowLen)
+stopAtr = ta.atr(atrStopLen)
+labelAtr = ta.atr(labelOffsetAtrLen)
+labelOffset = math.max(nz(labelAtr) * labelOffsetAtrMult, syminfo.mintick * labelOffsetMinTicks)
+
+plot(emaFast, color=color.rgb(30, 105, 220), linewidth=2, title="EMA 14")
+plot(emaMid, color=color.rgb(210, 140, 40), linewidth=2, title="EMA 34")
+plot(emaSlow, color=color.rgb(190, 65, 65), linewidth=2, title="EMA 90")
+
+inEntrySession = not useSessionFilter or ((hour > entryStartHour or (hour == entryStartHour and minute >= entryStartMinute)) and (hour < entryEndHour or (hour == entryEndHour and minute <= entryEndMinute)))
+forceExit = hour > forceExitHour or (hour == forceExitHour and minute >= forceExitMinute)
+
+buyStack = emaFast > emaMid and emaMid > emaSlow
+sellStack = emaFast < emaMid and emaMid < emaSlow
+
+buyBounce = low <= emaMid + bounceBufferPoints and close > emaFast
+sellBounce = high >= emaMid - bounceBufferPoints and close < emaFast
+
+buyCandleOK = not requireCandleDirection or close > open
+sellCandleOK = not requireCandleDirection or close < open
+distanceOK = math.abs(close - emaFast) <= maxDistanceFromFast
+buyBosOK = not useBosFilter or close > ta.highest(high[1], bosLookback)
+sellBosOK = not useBosFilter or close < ta.lowest(low[1], bosLookback)
+emaOverlapCount = (low <= emaFast and high >= emaFast ? 1 : 0) + (low <= emaMid and high >= emaMid ? 1 : 0) + (low <= emaSlow and high >= emaSlow ? 1 : 0)
+choppyOverlapBar = emaOverlapCount >= chopMinEmaOverlaps
+choppyOverlapCount = ta.sum(choppyOverlapBar[1] ? 1 : 0, chopLookback)
+chopOK = not useChopFilter or choppyOverlapCount <= maxChopOverlapBars
+
+buySignal = allowLong and buyStack and buyBounce and buyCandleOK and distanceOK and buyBosOK and chopOK
+sellSignal = allowShort and sellStack and sellBounce and sellCandleOK and distanceOK and sellBosOK and chopOK
+
+buyEntry = buySignal[1] and inEntrySession and strategy.position_size == 0
+sellEntry = sellSignal[1] and inEntrySession and strategy.position_size == 0
+
+buySwingSL = ta.lowest(low[1], swingLookback) - slBufferPoints
+sellSwingSL = ta.highest(high[1], swingLookback) + slBufferPoints
+buySignalSL = low[1] - slBufferPoints
+sellSignalSL = high[1] + slBufferPoints
+buyFixedSL = close - fixedStopPoints
+sellFixedSL = close + fixedStopPoints
+buyAtrSL = close - stopAtr * atrStopMult
+sellAtrSL = close + stopAtr * atrStopMult
+buyEma34SL = emaMid - slBufferPoints
+sellEma34SL = emaMid + slBufferPoints
+
+buySelectedSL = stopLossMode == "Fixed Points" ? buyFixedSL : stopLossMode == "Swing" ? buySwingSL : stopLossMode == "ATR" ? buyAtrSL : stopLossMode == "EMA 34" ? buyEma34SL : buySignalSL
+sellSelectedSL = stopLossMode == "Fixed Points" ? sellFixedSL : stopLossMode == "Swing" ? sellSwingSL : stopLossMode == "ATR" ? sellAtrSL : stopLossMode == "EMA 34" ? sellEma34SL : sellSignalSL
+
+var float activeSL = na
+var float activeTP = na
+var float activeRisk = na
+
+if buyEntry
+    risk = close - buySelectedSL
+    riskOK = risk > 0
+    if riskOK
+        activeSL := buySelectedSL
+        activeRisk := risk
+        activeTP := close + targetPoints
+        strategy.entry("EMA BUY", strategy.long)
+        if showLabels
+            label.new(bar_index, low - labelOffset, "BUY\nE: " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_up, color=color.rgb(70, 150, 95), textcolor=color.white, size=size.small)
+
+if sellEntry
+    risk = sellSelectedSL - close
+    riskOK = risk > 0
+    if riskOK
+        activeSL := sellSelectedSL
+        activeRisk := risk
+        activeTP := close - targetPoints
+        strategy.entry("EMA SELL", strategy.short)
+        if showLabels
+            label.new(bar_index, high + labelOffset, "SELL\nE: " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_down, color=color.rgb(190, 75, 75), textcolor=color.white, size=size.small)
+
+if strategy.position_size > 0
+    strategy.exit("BUY EXIT", "EMA BUY", stop=activeSL, limit=activeTP)
+    if close <= emaMid
+        strategy.close("EMA BUY", comment="Close Below EMA34")
+
+if strategy.position_size < 0
+    strategy.exit("SELL EXIT", "EMA SELL", stop=activeSL, limit=activeTP)
+    if close >= emaMid
+        strategy.close("EMA SELL", comment="Close Above EMA34")
+
+if forceExit and strategy.position_size != 0
+    strategy.close_all(comment="Day Exit")
+
+plot(strategy.position_size != 0 ? activeSL : na, title="Active SL", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 ? activeTP : na, title="Active Target", color=color.green, style=plot.style_linebr, linewidth=2)
+
+alertcondition(buyEntry, title="EMA 14/34/90 BUY ALERT", message="EMA 14 > EMA 34 > EMA 90 and price bounced from EMA 34 above EMA 14")
+alertcondition(sellEntry, title="EMA 14/34/90 SELL ALERT", message="EMA 14 < EMA 34 < EMA 90 and price bounced from EMA 34 below EMA 14")
