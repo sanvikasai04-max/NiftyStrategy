@@ -103,7 +103,7 @@ distanceOK = math.abs(close - emaFast) <= maxDistanceFromFast
 
 emaOverlapCount = (low <= emaFast and high >= emaFast ? 1 : 0) + (low <= emaMid and high >= emaMid ? 1 : 0) + (low <= emaSlow and high >= emaSlow ? 1 : 0)
 choppyOverlapBar = emaOverlapCount >= chopMinEmaOverlaps
-choppyOverlapCount = ta.sum(choppyOverlapBar[1] ? 1 : 0, chopLookback)
+choppyOverlapCount = math.sum(choppyOverlapBar[1] ? 1 : 0, chopLookback)
 chopOK = not useChopFilter or choppyOverlapCount <= maxChopOverlapBars
 
 buyWickOK = lowerWick >= body * minWickBodyRatio and lowerWick >= candleRange * minWickRangePct
