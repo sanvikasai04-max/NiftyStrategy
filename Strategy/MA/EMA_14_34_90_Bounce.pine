@@ -23,18 +23,36 @@ slBufferPoints = input.float(0.0, title="SL Buffer Points", minval=0.0, step=0.0
 maxDistanceFromFast = input.float(15.0, title="Max Distance From EMA 14", minval=0.1, step=0.5)
 bounceBufferPoints = input.float(2.0, title="EMA 34 Bounce Buffer Points", minval=0.0, step=0.5)
 requireCandleDirection = input.bool(true, title="Require Candle Direction")
-useBosFilter = input.bool(true, title="Use BOS Confirmation")
-bosLookback = input.int(5, title="BOS Lookback Bars", minval=2)
+
+rejectionMode = input.string("Wick", title="Rejection Mode", options=["None", "Wick", "Engulfing", "Either", "Both"])
+minWickBodyRatio = input.float(0.8, title="Min Wick/Body Ratio", minval=0.0, step=0.1)
+minWickRangePct = input.float(0.25, title="Min Wick/Range %", minval=0.0, maxval=1.0, step=0.05)
+useLowRiskRetest = input.bool(true, title="Use Low-Risk Retest Fallback")
+maxSignalRiskPoints = input.float(7.0, title="Max Signal Risk Points", minval=0.1, step=0.5)
+
+useMaChannel = input.bool(false, title="Use EMA High/Low Channel Retest")
+useSlopeFilter = input.bool(true, title="Use EMA Slope Filter")
+slopeLookback = input.int(5, title="Slope Lookback Bars", minval=1)
+minSlopePoints = input.float(0.5, title="Min EMA34 Slope Points/Bar", minval=0.0, step=0.05)
+useRibbonFilter = input.bool(true, title="Use EMA Ribbon Width Filter")
+ribbonLookback = input.int(20, title="Ribbon Width Average Lookback", minval=1)
+minRibbonWidthMult = input.float(0.9, title="Min Ribbon Width Multiplier", minval=0.0, step=0.05)
+useVolumeFilter = input.bool(false, title="Use Volume Filter")
+volumeLookback = input.int(20, title="Volume Average Lookback", minval=1)
+minVolumeMult = input.float(0.9, title="Min Volume Multiplier", minval=0.0, step=0.05)
+entryOnRejectionBreak = input.bool(false, title="Require Close Near Rejection Break")
+closeBreakRangePct = input.float(0.25, title="Close Break Range %", minval=0.0, maxval=1.0, step=0.05)
+
 useChopFilter = input.bool(true, title="Avoid EMA Overlap Chop")
 chopLookback = input.int(10, title="Chop Lookback Bars", minval=2)
 chopMinEmaOverlaps = input.int(2, title="Chop Min EMA Overlaps", minval=2, maxval=3)
 maxChopOverlapBars = input.int(3, title="Max Choppy Overlap Bars", minval=0)
 
 useSessionFilter = input.bool(true, title="Use Entry Session")
-entryStartHour = input.int(9, title="Entry Start Hour", minval=0, maxval=23)
-entryStartMinute = input.int(30, title="Entry Start Minute", minval=0, maxval=59)
-entryEndHour = input.int(14, title="Entry End Hour", minval=0, maxval=23)
-entryEndMinute = input.int(45, title="Entry End Minute", minval=0, maxval=59)
+entryStartHour = input.int(12, title="Entry Start Hour", minval=0, maxval=23)
+entryStartMinute = input.int(0, title="Entry Start Minute", minval=0, maxval=59)
+entryEndHour = input.int(13, title="Entry End Hour", minval=0, maxval=23)
+entryEndMinute = input.int(59, title="Entry End Minute", minval=0, maxval=59)
 forceExitHour = input.int(15, title="Force Exit Hour", minval=0, maxval=23)
 forceExitMinute = input.int(15, title="Force Exit Minute", minval=0, maxval=59)
 
@@ -50,13 +68,30 @@ labelOffsetMinTicks = input.int(20, title="Label Offset Minimum Ticks", minval=0
 emaFast = ta.ema(close, emaFastLen)
 emaMid = ta.ema(close, emaMidLen)
 emaSlow = ta.ema(close, emaSlowLen)
+emaChannelHigh = ta.ema(high, emaMidLen)
+emaChannelLow = ta.ema(low, emaMidLen)
 stopAtr = ta.atr(atrStopLen)
 labelAtr = ta.atr(labelOffsetAtrLen)
 labelOffset = math.max(nz(labelAtr) * labelOffsetAtrMult, syminfo.mintick * labelOffsetMinTicks)
 
+emaMidSlope = (emaMid - emaMid[slopeLookback]) / slopeLookback
+emaFastSlope = (emaFast - emaFast[slopeLookback]) / slopeLookback
+ribbonWidth = math.abs(emaFast - emaSlow)
+ribbonWidthAvg = ta.sma(ribbonWidth, ribbonLookback)
+volumeAvg = ta.sma(volume, volumeLookback)
+
+candleRange = high - low
+body = math.max(math.abs(close - open), syminfo.mintick)
+lowerWick = math.min(open, close) - low
+upperWick = high - math.max(open, close)
+bullishEngulfing = close > open and close[1] < open[1] and open <= close[1] and close >= open[1]
+bearishEngulfing = close < open and close[1] > open[1] and open >= close[1] and close <= open[1]
+
 plot(emaFast, color=color.rgb(30, 105, 220), linewidth=2, title="EMA 14")
 plot(emaMid, color=color.rgb(210, 140, 40), linewidth=2, title="EMA 34")
 plot(emaSlow, color=color.rgb(190, 65, 65), linewidth=2, title="EMA 90")
+plot(useMaChannel ? emaChannelHigh : na, color=color.new(color.orange, 55), linewidth=1, title="EMA34 High Channel")
+plot(useMaChannel ? emaChannelLow : na, color=color.new(color.orange, 55), linewidth=1, title="EMA34 Low Channel")
 
 inEntrySession = not useSessionFilter or ((hour > entryStartHour or (hour == entryStartHour and minute >= entryStartMinute)) and (hour < entryEndHour or (hour == entryEndHour and minute <= entryEndMinute)))
 forceExit = hour > forceExitHour or (hour == forceExitHour and minute >= forceExitMinute)
@@ -64,21 +99,42 @@ forceExit = hour > forceExitHour or (hour == forceExitHour and minute >= forceEx
 buyStack = emaFast > emaMid and emaMid > emaSlow
 sellStack = emaFast < emaMid and emaMid < emaSlow
 
-buyBounce = low <= emaMid + bounceBufferPoints and close > emaFast
-sellBounce = high >= emaMid - bounceBufferPoints and close < emaFast
-
-buyCandleOK = not requireCandleDirection or close > open
-sellCandleOK = not requireCandleDirection or close < open
 distanceOK = math.abs(close - emaFast) <= maxDistanceFromFast
-buyBosOK = not useBosFilter or close > ta.highest(high[1], bosLookback)
-sellBosOK = not useBosFilter or close < ta.lowest(low[1], bosLookback)
+
 emaOverlapCount = (low <= emaFast and high >= emaFast ? 1 : 0) + (low <= emaMid and high >= emaMid ? 1 : 0) + (low <= emaSlow and high >= emaSlow ? 1 : 0)
 choppyOverlapBar = emaOverlapCount >= chopMinEmaOverlaps
 choppyOverlapCount = ta.sum(choppyOverlapBar[1] ? 1 : 0, chopLookback)
 chopOK = not useChopFilter or choppyOverlapCount <= maxChopOverlapBars
 
-buySignal = allowLong and buyStack and buyBounce and buyCandleOK and distanceOK and buyBosOK and chopOK
-sellSignal = allowShort and sellStack and sellBounce and sellCandleOK and distanceOK and sellBosOK and chopOK
+buyWickOK = lowerWick >= body * minWickBodyRatio and lowerWick >= candleRange * minWickRangePct
+sellWickOK = upperWick >= body * minWickBodyRatio and upperWick >= candleRange * minWickRangePct
+buyRejectionOK = rejectionMode == "None" ? true : rejectionMode == "Wick" ? buyWickOK : rejectionMode == "Engulfing" ? bullishEngulfing : rejectionMode == "Both" ? buyWickOK and bullishEngulfing : buyWickOK or bullishEngulfing
+sellRejectionOK = rejectionMode == "None" ? true : rejectionMode == "Wick" ? sellWickOK : rejectionMode == "Engulfing" ? bearishEngulfing : rejectionMode == "Both" ? sellWickOK and bearishEngulfing : sellWickOK or bearishEngulfing
+
+buyLowRiskRetestOK = useLowRiskRetest and close - low > 0 and close - low <= maxSignalRiskPoints
+sellLowRiskRetestOK = useLowRiskRetest and high - close > 0 and high - close <= maxSignalRiskPoints
+
+buySlopeOK = not useSlopeFilter or (emaMidSlope >= minSlopePoints and emaFastSlope > 0)
+sellSlopeOK = not useSlopeFilter or (emaMidSlope <= -minSlopePoints and emaFastSlope < 0)
+ribbonOK = not useRibbonFilter or (not na(ribbonWidthAvg) and ribbonWidthAvg > 0 and ribbonWidth >= ribbonWidthAvg * minRibbonWidthMult)
+volumeOK = not useVolumeFilter or (not na(volumeAvg) and volume >= volumeAvg * minVolumeMult)
+
+buySupportLevel = useMaChannel ? emaChannelLow : emaMid
+sellResistanceLevel = useMaChannel ? emaChannelHigh : emaMid
+buyRetestOK = low <= buySupportLevel + bounceBufferPoints and close >= buySupportLevel
+sellRetestOK = high >= sellResistanceLevel - bounceBufferPoints and close <= sellResistanceLevel
+buyBounce = buyRetestOK and close > emaFast
+sellBounce = sellRetestOK and close < emaFast
+
+buyCandleOK = not requireCandleDirection or close > open
+sellCandleOK = not requireCandleDirection or close < open
+buyBreakOK = not entryOnRejectionBreak or close > high - candleRange * closeBreakRangePct
+sellBreakOK = not entryOnRejectionBreak or close < low + candleRange * closeBreakRangePct
+buyPriceActionOK = buyRejectionOK or buyLowRiskRetestOK
+sellPriceActionOK = sellRejectionOK or sellLowRiskRetestOK
+
+buySignal = allowLong and buyStack and buyBounce and buyCandleOK and buyBreakOK and buyPriceActionOK and distanceOK and chopOK and buySlopeOK and ribbonOK and volumeOK
+sellSignal = allowShort and sellStack and sellBounce and sellCandleOK and sellBreakOK and sellPriceActionOK and distanceOK and chopOK and sellSlopeOK and ribbonOK and volumeOK
 
 buyEntry = buySignal[1] and inEntrySession and strategy.position_size == 0
 sellEntry = sellSignal[1] and inEntrySession and strategy.position_size == 0
@@ -87,10 +143,10 @@ buySwingSL = ta.lowest(low[1], swingLookback) - slBufferPoints
 sellSwingSL = ta.highest(high[1], swingLookback) + slBufferPoints
 buySignalSL = low[1] - slBufferPoints
 sellSignalSL = high[1] + slBufferPoints
-buyFixedSL = close - fixedStopPoints
-sellFixedSL = close + fixedStopPoints
-buyAtrSL = close - stopAtr * atrStopMult
-sellAtrSL = close + stopAtr * atrStopMult
+buyFixedSL = open - fixedStopPoints
+sellFixedSL = open + fixedStopPoints
+buyAtrSL = open - stopAtr * atrStopMult
+sellAtrSL = open + stopAtr * atrStopMult
 buyEma34SL = emaMid - slBufferPoints
 sellEma34SL = emaMid + slBufferPoints
 
@@ -102,26 +158,26 @@ var float activeTP = na
 var float activeRisk = na
 
 if buyEntry
-    risk = close - buySelectedSL
+    risk = open - buySelectedSL
     riskOK = risk > 0
     if riskOK
         activeSL := buySelectedSL
         activeRisk := risk
-        activeTP := close + targetPoints
+        activeTP := open + targetPoints
         strategy.entry("EMA BUY", strategy.long)
         if showLabels
-            label.new(bar_index, low - labelOffset, "BUY\nE: " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_up, color=color.rgb(70, 150, 95), textcolor=color.white, size=size.small)
+            label.new(bar_index, low - labelOffset, "BUY\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_up, color=color.rgb(70, 150, 95), textcolor=color.white, size=size.small)
 
 if sellEntry
-    risk = sellSelectedSL - close
+    risk = sellSelectedSL - open
     riskOK = risk > 0
     if riskOK
         activeSL := sellSelectedSL
         activeRisk := risk
-        activeTP := close - targetPoints
+        activeTP := open - targetPoints
         strategy.entry("EMA SELL", strategy.short)
         if showLabels
-            label.new(bar_index, high + labelOffset, "SELL\nE: " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_down, color=color.rgb(190, 75, 75), textcolor=color.white, size=size.small)
+            label.new(bar_index, high + labelOffset, "SELL\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_down, color=color.rgb(190, 75, 75), textcolor=color.white, size=size.small)
 
 if strategy.position_size > 0
     strategy.exit("BUY EXIT", "EMA BUY", stop=activeSL, limit=activeTP)
@@ -139,5 +195,5 @@ if forceExit and strategy.position_size != 0
 plot(strategy.position_size != 0 ? activeSL : na, title="Active SL", color=color.red, style=plot.style_linebr, linewidth=2)
 plot(strategy.position_size != 0 ? activeTP : na, title="Active Target", color=color.green, style=plot.style_linebr, linewidth=2)
 
-alertcondition(buyEntry, title="EMA 14/34/90 BUY ALERT", message="EMA 14 > EMA 34 > EMA 90 and price bounced from EMA 34 above EMA 14")
-alertcondition(sellEntry, title="EMA 14/34/90 SELL ALERT", message="EMA 14 < EMA 34 < EMA 90 and price bounced from EMA 34 below EMA 14")
+alertcondition(buyEntry, title="EMA 14/34/90 BUY ALERT", message="EMA34 dynamic support retest with bullish rejection and trend-quality filters")
+alertcondition(sellEntry, title="EMA 14/34/90 SELL ALERT", message="EMA34 dynamic resistance retest with bearish rejection and trend-quality filters")
