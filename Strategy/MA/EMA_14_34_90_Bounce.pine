@@ -66,6 +66,29 @@ rsiTradeLong = input.bool(false, title="Trade RSI Long")
 rsiTradeShort = input.bool(true, title="Trade RSI Short")
 rsiMinTradeMinutes = input.int(5, title="RSI Min Trade Timeframe Minutes", minval=1)
 
+useSmcSetup = input.bool(false, title="Show SMC Candidates")
+tradeSmcSetup = input.bool(false, title="Trade SMC Setup")
+smcSwingLookback = input.int(10, title="SMC Swing Lookback", minval=2)
+smcSweepBuffer = input.float(1.0, title="SMC Sweep Buffer Points", minval=0.0, step=0.05)
+smcBreakBuffer = input.float(0.5, title="SMC Break Buffer Points", minval=0.0, step=0.05)
+smcLevelBuffer = input.float(8.0, title="SMC Level Buffer Points", minval=0.0, step=0.5)
+smcZoneBuffer = input.float(1.0, title="SMC Zone Buffer Points", minval=0.0, step=0.05)
+smcChochLookback = input.int(10, title="SMC CHOCH Lookback", minval=1)
+smcCisdLookback = input.int(3, title="SMC CISD Lookback", minval=1)
+smcAmdLookback = input.int(12, title="SMC AMD Lookback", minval=2)
+smcAmdMaxRangePoints = input.float(45.0, title="SMC AMD Max Range Points", minval=0.1, step=0.5)
+smcTrapLookback = input.int(8, title="SMC Trap Lookback", minval=2)
+smcTrapMinSweeps = input.int(3, title="SMC Trap Min Sweeps", minval=1)
+smcAvoidTrapZones = input.bool(true, title="SMC Avoid Trap Zones")
+smcRequireDisplacement = input.bool(false, title="SMC Require Displacement")
+smcDisplacementMult = input.float(0.8, title="SMC Displacement Multiplier", minval=0.0, step=0.1)
+smcTargetPoints = input.float(30.0, title="SMC Target Points", minval=0.1, step=0.5)
+maxSmcRiskPoints = input.float(20.0, title="Max SMC Risk Points", minval=0.1, step=0.5)
+smcTradeLong = input.bool(true, title="Trade SMC Long")
+smcTradeShort = input.bool(true, title="Trade SMC Short")
+smcMinTradeMinutes = input.int(5, title="SMC Min Trade Timeframe Minutes", minval=1)
+showSmcLevels = input.bool(true, title="Show SMC Levels")
+
 useChopFilter = input.bool(true, title="Avoid EMA Overlap Chop")
 chopLookback = input.int(10, title="Chop Lookback Bars", minval=2)
 chopMinEmaOverlaps = input.int(2, title="Chop Min EMA Overlaps", minval=2, maxval=3)
@@ -107,6 +130,8 @@ rsiTrend = ta.rsi(close, rsiTrendLen)
 
 candleRange = high - low
 body = math.max(math.abs(close - open), syminfo.mintick)
+bodyHigh = math.max(open, close)
+bodyLow = math.min(open, close)
 lowerWick = math.min(open, close) - low
 upperWick = high - math.max(open, close)
 bullishEngulfing = close > open and close[1] < open[1] and open <= close[1] and close >= open[1]
@@ -183,13 +208,92 @@ rsiSellCandidate = useRsiSetup and allowShort and rsiSellTrendOK and (rsiSellMom
 chartMinutes = timeframe.in_seconds(timeframe.period) / 60.0
 rsiTradeTimeframeOK = chartMinutes >= rsiMinTradeMinutes
 
-buySignal = emaBuySignal or (tradeRsiSetup and rsiTradeLong and rsiTradeTimeframeOK and rsiBuyCandidate)
-sellSignal = emaSellSignal or (tradeRsiSetup and rsiTradeShort and rsiTradeTimeframeOK and rsiSellCandidate)
+newDay = ta.change(time("D")) != 0
+var float dayHigh = na
+var float dayLow = na
+dayHigh := newDay ? high : math.max(nz(dayHigh, high), high)
+dayLow := newDay ? low : math.min(nz(dayLow, low), low)
+prevDayHigh = request.security(syminfo.tickerid, "D", high[1], barmerge.gaps_off, barmerge.lookahead_off)
+prevDayLow = request.security(syminfo.tickerid, "D", low[1], barmerge.gaps_off, barmerge.lookahead_off)
+prevHtfHigh = request.security(syminfo.tickerid, "15", high[1], barmerge.gaps_off, barmerge.lookahead_off)
+prevHtfLow = request.security(syminfo.tickerid, "15", low[1], barmerge.gaps_off, barmerge.lookahead_off)
+smcSwingHigh = ta.highest(high[1], smcSwingLookback)
+smcSwingLow = ta.lowest(low[1], smcSwingLookback)
+
+buyLiquiditySweep = (low < smcSwingLow - smcSweepBuffer or low < prevDayLow - smcSweepBuffer or low < prevHtfLow - smcSweepBuffer) and close > math.min(smcSwingLow, math.min(prevDayLow, prevHtfLow))
+sellLiquiditySweep = (high > smcSwingHigh + smcSweepBuffer or high > prevDayHigh + smcSweepBuffer or high > prevHtfHigh + smcSweepBuffer) and close < math.max(smcSwingHigh, math.max(prevDayHigh, prevHtfHigh))
+turtleSoupBuy = low < prevDayLow - smcSweepBuffer and close > prevDayLow
+turtleSoupSell = high > prevDayHigh + smcSweepBuffer and close < prevDayHigh
+crtBuy = low < low[1] - smcSweepBuffer and close > high[1]
+crtSell = high > high[1] + smcSweepBuffer and close < low[1]
+bosBuy = close > smcSwingHigh + smcBreakBuffer
+bosSell = close < smcSwingLow - smcBreakBuffer
+recentBuySweep = ta.highest(buyLiquiditySweep[1] ? 1 : 0, smcChochLookback) > 0
+recentSellSweep = ta.highest(sellLiquiditySweep[1] ? 1 : 0, smcChochLookback) > 0
+chochBuy = recentBuySweep and bosBuy
+chochSell = recentSellSweep and bosSell
+cisdBuy = recentBuySweep and close > ta.highest(bodyHigh[1], smcCisdLookback)
+cisdSell = recentSellSweep and close < ta.lowest(bodyLow[1], smcCisdLookback)
+
+bullFvg = low > high[2] + smcZoneBuffer and close > open
+bearFvg = high < low[2] - smcZoneBuffer and close < open
+var float bullFvgLow = na
+var float bullFvgHigh = na
+var float bearFvgLow = na
+var float bearFvgHigh = na
+if bullFvg
+    bullFvgLow := high[2]
+    bullFvgHigh := low
+if bearFvg
+    bearFvgLow := high
+    bearFvgHigh := low[2]
+inBullFvg = not na(bullFvgLow) and low <= bullFvgHigh + smcZoneBuffer and high >= bullFvgLow - smcZoneBuffer
+inBearFvg = not na(bearFvgHigh) and high >= bearFvgLow - smcZoneBuffer and low <= bearFvgHigh + smcZoneBuffer
+bullIfvg = not na(bearFvgHigh) and close > bearFvgHigh
+bearIfvg = not na(bullFvgLow) and close < bullFvgLow
+
+bullOb = close[1] < open[1] and bosBuy
+bearOb = close[1] > open[1] and bosSell
+var float bullObLow = na
+var float bullObHigh = na
+var float bearObLow = na
+var float bearObHigh = na
+if bullOb
+    bullObLow := low[1]
+    bullObHigh := open[1]
+if bearOb
+    bearObLow := open[1]
+    bearObHigh := high[1]
+inBullOb = not na(bullObHigh) and low <= bullObHigh + smcZoneBuffer and high >= bullObLow - smcZoneBuffer
+inBearOb = not na(bearObLow) and high >= bearObLow - smcZoneBuffer and low <= bearObHigh + smcZoneBuffer
+bullBreaker = not na(bearObHigh) and close > bearObHigh
+bearBreaker = not na(bullObLow) and close < bullObLow
+
+amdHigh = ta.highest(high[1], smcAmdLookback)
+amdLow = ta.lowest(low[1], smcAmdLookback)
+accumulationZone = amdHigh - amdLow <= smcAmdMaxRangePoints
+amdBuy = accumulationZone[1] and buyLiquiditySweep and close > amdHigh
+amdSell = accumulationZone[1] and sellLiquiditySweep and close < amdLow
+avgRangeSmc = ta.sma(candleRange, smcAmdLookback)
+displacementBuy = close > open + avgRangeSmc * smcDisplacementMult
+displacementSell = close < open - avgRangeSmc * smcDisplacementMult
+sweepCount = math.sum((buyLiquiditySweep[1] or sellLiquiditySweep[1]) ? 1 : 0, smcTrapLookback)
+displacementCount = math.sum((displacementBuy[1] or displacementSell[1]) ? 1 : 0, smcTrapLookback)
+trapZone = sweepCount >= smcTrapMinSweeps and displacementCount == 0
+
+nearBuyLevel = math.abs(low - smcSwingLow) <= smcLevelBuffer or math.abs(low - prevDayLow) <= smcLevelBuffer or math.abs(low - prevHtfLow) <= smcLevelBuffer
+nearSellLevel = math.abs(high - smcSwingHigh) <= smcLevelBuffer or math.abs(high - prevDayHigh) <= smcLevelBuffer or math.abs(high - prevHtfHigh) <= smcLevelBuffer
+smcBuyCandidate = useSmcSetup and allowLong and (buyLiquiditySweep or turtleSoupBuy or crtBuy) and (chochBuy or cisdBuy or bosBuy) and (inBullFvg or bullIfvg or inBullOb or bullBreaker or amdBuy or nearBuyLevel) and (not smcRequireDisplacement or displacementBuy) and close > open and (not smcAvoidTrapZones or not trapZone)
+smcSellCandidate = useSmcSetup and allowShort and (sellLiquiditySweep or turtleSoupSell or crtSell) and (chochSell or cisdSell or bosSell) and (inBearFvg or bearIfvg or inBearOb or bearBreaker or amdSell or nearSellLevel) and (not smcRequireDisplacement or displacementSell) and close < open and (not smcAvoidTrapZones or not trapZone)
+smcTradeTimeframeOK = chartMinutes >= smcMinTradeMinutes
+
+buySignal = emaBuySignal or (tradeRsiSetup and rsiTradeLong and rsiTradeTimeframeOK and rsiBuyCandidate) or (tradeSmcSetup and smcTradeLong and smcTradeTimeframeOK and smcBuyCandidate)
+sellSignal = emaSellSignal or (tradeRsiSetup and rsiTradeShort and rsiTradeTimeframeOK and rsiSellCandidate) or (tradeSmcSetup and smcTradeShort and smcTradeTimeframeOK and smcSellCandidate)
 
 buyEntry = buySignal[1] and inEntrySession and strategy.position_size == 0
 sellEntry = sellSignal[1] and inEntrySession and strategy.position_size == 0
-buyEntrySetup = emaBuySignal[1] ? "EMA" : "RSI"
-sellEntrySetup = emaSellSignal[1] ? "EMA" : "RSI"
+buyEntrySetup = emaBuySignal[1] ? "EMA" : rsiBuyCandidate[1] and tradeRsiSetup ? "RSI" : "SMC"
+sellEntrySetup = emaSellSignal[1] ? "EMA" : rsiSellCandidate[1] and tradeRsiSetup ? "RSI" : "SMC"
 
 buySwingSL = ta.lowest(low[1], swingLookback) - slBufferPoints
 sellSwingSL = ta.highest(high[1], swingLookback) + slBufferPoints
@@ -213,11 +317,12 @@ var float bestMove = na
 
 if buyEntry
     risk = open - buySelectedSL
-    riskOK = risk > 0 and (buyEntrySetup == "EMA" or risk <= maxRsiRiskPoints)
+    riskLimit = buyEntrySetup == "RSI" ? maxRsiRiskPoints : buyEntrySetup == "SMC" ? maxSmcRiskPoints : 1000000.0
+    riskOK = risk > 0 and risk <= riskLimit
     if riskOK
         activeSL := buySelectedSL
         activeRisk := risk
-        activeTP := open + (buyEntrySetup == "RSI" ? rsiTargetPoints : targetPoints)
+        activeTP := open + (buyEntrySetup == "RSI" ? rsiTargetPoints : buyEntrySetup == "SMC" ? smcTargetPoints : targetPoints)
         activeEntry := open
         bestMove := 0.0
         strategy.entry("EMA BUY", strategy.long)
@@ -226,11 +331,12 @@ if buyEntry
 
 if sellEntry
     risk = sellSelectedSL - open
-    riskOK = risk > 0 and (sellEntrySetup == "EMA" or risk <= maxRsiRiskPoints)
+    riskLimit = sellEntrySetup == "RSI" ? maxRsiRiskPoints : sellEntrySetup == "SMC" ? maxSmcRiskPoints : 1000000.0
+    riskOK = risk > 0 and risk <= riskLimit
     if riskOK
         activeSL := sellSelectedSL
         activeRisk := risk
-        activeTP := open - (sellEntrySetup == "RSI" ? rsiTargetPoints : targetPoints)
+        activeTP := open - (sellEntrySetup == "RSI" ? rsiTargetPoints : sellEntrySetup == "SMC" ? smcTargetPoints : targetPoints)
         activeEntry := open
         bestMove := 0.0
         strategy.entry("EMA SELL", strategy.short)
@@ -260,8 +366,17 @@ plot(strategy.position_size != 0 ? activeSL : na, title="Initial SL", color=colo
 plot(strategy.position_size != 0 ? activeTP : na, title="Active Target", color=color.green, style=plot.style_linebr, linewidth=2)
 plotshape(rsiBuyCandidate, title="RSI BUY Candidate", style=shape.triangleup, location=location.belowbar, color=color.rgb(40, 165, 120), size=size.tiny, text="RSI")
 plotshape(rsiSellCandidate, title="RSI SELL Candidate", style=shape.triangledown, location=location.abovebar, color=color.rgb(220, 95, 80), size=size.tiny, text="RSI")
+plotshape(smcBuyCandidate, title="SMC BUY Candidate", style=shape.circle, location=location.belowbar, color=color.rgb(35, 190, 160), size=size.tiny, text="SMC")
+plotshape(smcSellCandidate, title="SMC SELL Candidate", style=shape.circle, location=location.abovebar, color=color.rgb(225, 120, 60), size=size.tiny, text="SMC")
+plotshape(trapZone and useSmcSetup, title="SMC Trap Zone", style=shape.xcross, location=location.top, color=color.rgb(190, 70, 210), size=size.tiny, text="TRAP")
+plot(showSmcLevels ? prevDayHigh : na, title="Prev Day High", color=color.new(color.red, 35), linewidth=1)
+plot(showSmcLevels ? prevDayLow : na, title="Prev Day Low", color=color.new(color.green, 35), linewidth=1)
+plot(showSmcLevels ? prevHtfHigh : na, title="Prev HTF High", color=color.new(color.red, 70), linewidth=1)
+plot(showSmcLevels ? prevHtfLow : na, title="Prev HTF Low", color=color.new(color.green, 70), linewidth=1)
 
 alertcondition(buyEntry, title="EMA 14/34/90 BUY ALERT", message="EMA34 dynamic support retest with bullish rejection and trend-quality filters")
 alertcondition(sellEntry, title="EMA 14/34/90 SELL ALERT", message="EMA34 dynamic resistance retest with bearish rejection and trend-quality filters")
 alertcondition(rsiBuyCandidate, title="RSI BUY CANDIDATE ALERT", message="RSI50 bullish bias with RSI10 momentum or pullback confirmation")
 alertcondition(rsiSellCandidate, title="RSI SELL CANDIDATE ALERT", message="RSI50 bearish bias with RSI10 momentum or pullback confirmation")
+alertcondition(smcBuyCandidate, title="SMC BUY CANDIDATE ALERT", message="SMC buy: liquidity sweep with CHOCH/CISD and FVG/OB/level confirmation")
+alertcondition(smcSellCandidate, title="SMC SELL CANDIDATE ALERT", message="SMC sell: liquidity sweep with CHOCH/CISD and FVG/OB/level confirmation")

@@ -107,7 +107,7 @@ def add_indicators(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
     out["rsi_prev_high"] = out["rsi_fast"].shift(1).rolling(args.rsi_retest_bars).max()
     out["rsi_break_high"] = out["high"].shift(1).rolling(args.rsi_breakout_lookback).max()
     out["rsi_break_low"] = out["low"].shift(1).rolling(args.rsi_breakout_lookback).min()
-    return out
+    return add_smc_indicators(out, args)
 
 
 def rsi(close: pd.Series, length: int) -> pd.Series:
@@ -122,6 +122,88 @@ def rsi(close: pd.Series, length: int) -> pd.Series:
     value = value.mask((avg_gain == 0) & (avg_loss > 0), 0.0)
     value = value.mask((avg_gain == 0) & (avg_loss == 0), 50.0)
     return value
+
+
+def add_smc_indicators(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    out = df.copy()
+
+    day_key = out["datetime"].dt.normalize()
+    out["day_high"] = out.groupby(day_key)["high"].cummax()
+    out["day_low"] = out.groupby(day_key)["low"].cummin()
+    daily = out.groupby(day_key).agg(day_full_high=("high", "max"), day_full_low=("low", "min"))
+    out["prev_day_high"] = day_key.map(daily["day_full_high"].shift(1))
+    out["prev_day_low"] = day_key.map(daily["day_full_low"].shift(1))
+
+    htf_key = out["datetime"].dt.floor(f"{args.smc_htf_minutes}min")
+    htf = out.groupby(htf_key).agg(htf_full_high=("high", "max"), htf_full_low=("low", "min"))
+    out["prev_htf_high"] = htf_key.map(htf["htf_full_high"].shift(1))
+    out["prev_htf_low"] = htf_key.map(htf["htf_full_low"].shift(1))
+
+    swing_lb = args.smc_swing_lookback
+    out["swing_high_level"] = out["high"].shift(1).rolling(swing_lb).max()
+    out["swing_low_level"] = out["low"].shift(1).rolling(swing_lb).min()
+    out["support_level"] = out["swing_low_level"]
+    out["resistance_level"] = out["swing_high_level"]
+
+    sweep_buffer = args.smc_sweep_buffer
+    out["buy_liquidity_sweep"] = (
+        ((out["low"] < out["swing_low_level"] - sweep_buffer) | (out["low"] < out["prev_day_low"] - sweep_buffer) | (out["low"] < out["prev_htf_low"] - sweep_buffer))
+        & (out["close"] > out[["swing_low_level", "prev_day_low", "prev_htf_low"]].min(axis=1))
+    )
+    out["sell_liquidity_sweep"] = (
+        ((out["high"] > out["swing_high_level"] + sweep_buffer) | (out["high"] > out["prev_day_high"] + sweep_buffer) | (out["high"] > out["prev_htf_high"] + sweep_buffer))
+        & (out["close"] < out[["swing_high_level", "prev_day_high", "prev_htf_high"]].max(axis=1))
+    )
+    out["turtle_soup_buy"] = (out["low"] < out["prev_day_low"] - sweep_buffer) & (out["close"] > out["prev_day_low"])
+    out["turtle_soup_sell"] = (out["high"] > out["prev_day_high"] + sweep_buffer) & (out["close"] < out["prev_day_high"])
+    out["crt_buy"] = (out["low"] < out["low"].shift(1) - sweep_buffer) & (out["close"] > out["high"].shift(1))
+    out["crt_sell"] = (out["high"] > out["high"].shift(1) + sweep_buffer) & (out["close"] < out["low"].shift(1))
+
+    out["bos_buy"] = out["close"] > out["swing_high_level"] + args.smc_break_buffer
+    out["bos_sell"] = out["close"] < out["swing_low_level"] - args.smc_break_buffer
+    recent_buy_sweep = out["buy_liquidity_sweep"].shift(1).rolling(args.smc_choch_lookback).max().fillna(False).astype(bool)
+    recent_sell_sweep = out["sell_liquidity_sweep"].shift(1).rolling(args.smc_choch_lookback).max().fillna(False).astype(bool)
+    out["choch_buy"] = recent_buy_sweep & out["bos_buy"]
+    out["choch_sell"] = recent_sell_sweep & out["bos_sell"]
+    out["cisd_buy"] = recent_buy_sweep & (out["close"] > out[["open", "close"]].max(axis=1).shift(1).rolling(args.smc_cisd_lookback).max())
+    out["cisd_sell"] = recent_sell_sweep & (out["close"] < out[["open", "close"]].min(axis=1).shift(1).rolling(args.smc_cisd_lookback).min())
+
+    out["bull_fvg"] = (out["low"] > out["high"].shift(2) + args.smc_zone_buffer) & (out["close"] > out["open"])
+    out["bear_fvg"] = (out["high"] < out["low"].shift(2) - args.smc_zone_buffer) & (out["close"] < out["open"])
+    out["bull_fvg_low"] = out["high"].shift(2).where(out["bull_fvg"]).ffill()
+    out["bull_fvg_high"] = out["low"].where(out["bull_fvg"]).ffill()
+    out["bear_fvg_low"] = out["high"].where(out["bear_fvg"]).ffill()
+    out["bear_fvg_high"] = out["low"].shift(2).where(out["bear_fvg"]).ffill()
+    out["in_bull_fvg"] = (out["low"] <= out["bull_fvg_high"] + args.smc_zone_buffer) & (out["high"] >= out["bull_fvg_low"] - args.smc_zone_buffer)
+    out["in_bear_fvg"] = (out["high"] >= out["bear_fvg_low"] - args.smc_zone_buffer) & (out["low"] <= out["bear_fvg_high"] + args.smc_zone_buffer)
+    out["bull_ifvg"] = out["bear_fvg"].shift(1).rolling(args.smc_zone_lookback).max().fillna(False).astype(bool) & (out["close"] > out["bear_fvg_high"])
+    out["bear_ifvg"] = out["bull_fvg"].shift(1).rolling(args.smc_zone_lookback).max().fillna(False).astype(bool) & (out["close"] < out["bull_fvg_low"])
+
+    out["bull_ob"] = (out["close"].shift(1) < out["open"].shift(1)) & out["bos_buy"]
+    out["bear_ob"] = (out["close"].shift(1) > out["open"].shift(1)) & out["bos_sell"]
+    out["bull_ob_low"] = out["low"].shift(1).where(out["bull_ob"]).ffill()
+    out["bull_ob_high"] = out["open"].shift(1).where(out["bull_ob"]).ffill()
+    out["bear_ob_low"] = out["open"].shift(1).where(out["bear_ob"]).ffill()
+    out["bear_ob_high"] = out["high"].shift(1).where(out["bear_ob"]).ffill()
+    out["in_bull_ob"] = (out["low"] <= out["bull_ob_high"] + args.smc_zone_buffer) & (out["high"] >= out["bull_ob_low"] - args.smc_zone_buffer)
+    out["in_bear_ob"] = (out["high"] >= out["bear_ob_low"] - args.smc_zone_buffer) & (out["low"] <= out["bear_ob_high"] + args.smc_zone_buffer)
+    out["bull_breaker"] = out["bear_ob"].shift(1).rolling(args.smc_zone_lookback).max().fillna(False).astype(bool) & (out["close"] > out["bear_ob_high"])
+    out["bear_breaker"] = out["bull_ob"].shift(1).rolling(args.smc_zone_lookback).max().fillna(False).astype(bool) & (out["close"] < out["bull_ob_low"])
+
+    range_avg = out["range"].rolling(args.smc_amd_lookback).mean()
+    range_high = out["high"].shift(1).rolling(args.smc_amd_lookback).max()
+    range_low = out["low"].shift(1).rolling(args.smc_amd_lookback).min()
+    out["accumulation_zone"] = (range_high - range_low) <= args.smc_amd_max_range_points
+    accumulation_prev = pd.Series(np.r_[False, out["accumulation_zone"].to_numpy(dtype=bool)[:-1]], index=out.index)
+    out["amd_buy"] = accumulation_prev & out["buy_liquidity_sweep"] & (out["close"] > range_high)
+    out["amd_sell"] = accumulation_prev & out["sell_liquidity_sweep"] & (out["close"] < range_low)
+    out["displacement_buy"] = out["close"] > out["open"] + range_avg * args.smc_displacement_mult
+    out["displacement_sell"] = out["close"] < out["open"] - range_avg * args.smc_displacement_mult
+
+    sweep_count = (out["buy_liquidity_sweep"] | out["sell_liquidity_sweep"]).shift(1).rolling(args.smc_trap_lookback).sum()
+    displacement_count = (out["displacement_buy"] | out["displacement_sell"]).shift(1).rolling(args.smc_trap_lookback).sum()
+    out["trap_zone"] = (sweep_count >= args.smc_trap_min_sweeps) & (displacement_count == 0)
+    return out
 
 
 def parse_clock(value: str) -> tuple[int, int]:
@@ -340,6 +422,50 @@ def rsi_signal_on_bar(row: pd.Series, args: argparse.Namespace, side: str) -> bo
     return bool(trend_ok and (momentum_cross or pullback_reject))
 
 
+def smc_price_near_level(row: pd.Series, args: argparse.Namespace, side: str) -> bool:
+    levels = ["support_level", "prev_day_low", "prev_htf_low"] if side == "BUY" else ["resistance_level", "prev_day_high", "prev_htf_high"]
+    price = row.low if side == "BUY" else row.high
+    for name in levels:
+        level = row.get(name, np.nan)
+        if not pd.isna(level) and abs(price - level) <= args.smc_level_buffer:
+            return True
+    return False
+
+
+def smc_signal_on_bar(row: pd.Series, args: argparse.Namespace, side: str) -> bool:
+    if not args.use_smc_setup:
+        return False
+    if args.use_chop_filter and not bool(row.chop_ok):
+        return False
+    if args.smc_avoid_trap_zones and bool(row.trap_zone):
+        return False
+
+    if side == "BUY":
+        sweep_ok = bool(row.buy_liquidity_sweep or row.turtle_soup_buy or row.crt_buy)
+        structure_ok = bool(row.choch_buy or row.cisd_buy or row.bos_buy)
+        zone_ok = bool(row.in_bull_fvg or row.bull_ifvg or row.in_bull_ob or row.bull_breaker or row.amd_buy or smc_price_near_level(row, args, side))
+        displacement_ok = not args.smc_require_displacement or bool(row.displacement_buy)
+        candle_ok = row.close > row.open
+        return bool(sweep_ok and structure_ok and zone_ok and displacement_ok and candle_ok)
+
+    sweep_ok = bool(row.sell_liquidity_sweep or row.turtle_soup_sell or row.crt_sell)
+    structure_ok = bool(row.choch_sell or row.cisd_sell or row.bos_sell)
+    zone_ok = bool(row.in_bear_fvg or row.bear_ifvg or row.in_bear_ob or row.bear_breaker or row.amd_sell or smc_price_near_level(row, args, side))
+    displacement_ok = not args.smc_require_displacement or bool(row.displacement_sell)
+    candle_ok = row.close < row.open
+    return bool(sweep_ok and structure_ok and zone_ok and displacement_ok and candle_ok)
+
+
+def smc_trade_allowed(timeframe: str, side: str, args: argparse.Namespace) -> bool:
+    if timeframe_minutes(timeframe) < args.smc_min_trade_timeframe_minutes:
+        return False
+    if args.smc_trade_side == "buy" and side != "BUY":
+        return False
+    if args.smc_trade_side == "sell" and side != "SELL":
+        return False
+    return True
+
+
 def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
     df = add_indicators(load_data(path), args)
     df["ema_overlap_count"] = (
@@ -351,7 +477,21 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
     df["choppy_overlap_count"] = df["choppy_overlap_bar"].shift(1).rolling(args.chop_lookback).sum()
     df["chop_ok"] = df["choppy_overlap_count"] <= args.max_chop_overlap_bars
     trades: list[dict[str, object]] = []
-    counts = {"buy_signals": 0, "sell_signals": 0, "buy_entries": 0, "sell_entries": 0, "ignored": 0, "rsi_buy_candidates": 0, "rsi_sell_candidates": 0, "rsi_buy_entries": 0, "rsi_sell_entries": 0}
+    counts = {
+        "buy_signals": 0,
+        "sell_signals": 0,
+        "buy_entries": 0,
+        "sell_entries": 0,
+        "ignored": 0,
+        "rsi_buy_candidates": 0,
+        "rsi_sell_candidates": 0,
+        "rsi_buy_entries": 0,
+        "rsi_sell_entries": 0,
+        "smc_buy_candidates": 0,
+        "smc_sell_candidates": 0,
+        "smc_buy_entries": 0,
+        "smc_sell_entries": 0,
+    }
 
     in_pos = False
     side = ""
@@ -426,12 +566,16 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
         ema_sell_setup = signal_on_bar(prev, args, "SELL")
         rsi_buy_setup = rsi_signal_on_bar(prev, args, "BUY")
         rsi_sell_setup = rsi_signal_on_bar(prev, args, "SELL")
+        smc_buy_setup = smc_signal_on_bar(prev, args, "BUY")
+        smc_sell_setup = smc_signal_on_bar(prev, args, "SELL")
         trade_rsi_buy = args.trade_rsi_setup and rsi_buy_setup and rsi_trade_allowed(timeframe, "BUY", args)
         trade_rsi_sell = args.trade_rsi_setup and rsi_sell_setup and rsi_trade_allowed(timeframe, "SELL", args)
-        buy_setup = ema_buy_setup or trade_rsi_buy
-        sell_setup = ema_sell_setup or trade_rsi_sell
-        buy_setup_name = "EMA" if ema_buy_setup else "RSI"
-        sell_setup_name = "EMA" if ema_sell_setup else "RSI"
+        trade_smc_buy = args.trade_smc_setup and smc_buy_setup and smc_trade_allowed(timeframe, "BUY", args)
+        trade_smc_sell = args.trade_smc_setup and smc_sell_setup and smc_trade_allowed(timeframe, "SELL", args)
+        buy_setup = ema_buy_setup or trade_rsi_buy or trade_smc_buy
+        sell_setup = ema_sell_setup or trade_rsi_sell or trade_smc_sell
+        buy_setup_name = "EMA" if ema_buy_setup else "RSI" if trade_rsi_buy else "SMC"
+        sell_setup_name = "EMA" if ema_sell_setup else "RSI" if trade_rsi_sell else "SMC"
 
         if ema_buy_setup:
             counts["buy_signals"] += 1
@@ -441,6 +585,10 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             counts["rsi_buy_candidates"] += 1
         if rsi_sell_setup:
             counts["rsi_sell_candidates"] += 1
+        if smc_buy_setup:
+            counts["smc_buy_candidates"] += 1
+        if smc_sell_setup:
+            counts["smc_sell_candidates"] += 1
 
         if not in_session(ts, args.entry_start, args.entry_end):
             if buy_setup or sell_setup:
@@ -462,7 +610,10 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             if buy_setup_name == "RSI" and risk > args.max_rsi_risk_points:
                 counts["ignored"] += 1
                 continue
-            trade_target_points = args.rsi_target_points if buy_setup_name == "RSI" else args.target_points
+            if buy_setup_name == "SMC" and risk > args.max_smc_risk_points:
+                counts["ignored"] += 1
+                continue
+            trade_target_points = args.rsi_target_points if buy_setup_name == "RSI" else args.smc_target_points if buy_setup_name == "SMC" else args.target_points
             tp = entry + trade_target_points
             side = "BUY"
             in_pos = True
@@ -471,7 +622,15 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             counts["buy_entries"] += 1
             if buy_setup_name == "RSI":
                 counts["rsi_buy_entries"] += 1
-            reason = "EMA34 dynamic support retest with bullish rejection" if buy_setup_name == "EMA" else "RSI50 bullish bias with RSI10 momentum/pullback confirmation"
+            if buy_setup_name == "SMC":
+                counts["smc_buy_entries"] += 1
+            reason = (
+                "EMA34 dynamic support retest with bullish rejection"
+                if buy_setup_name == "EMA"
+                else "RSI50 bullish bias with RSI10 momentum/pullback confirmation"
+                if buy_setup_name == "RSI"
+                else "SMC liquidity sweep with CHOCH/CISD and zone confirmation"
+            )
             open_trade = {"timeframe": timeframe, "setup": buy_setup_name, "side": side, "entry_time": ts, "entry": entry, "initial_sl": sl, "target": tp, "risk": risk, "ema_fast": row.ema_fast, "ema_mid": row.ema_mid, "ema_slow": row.ema_slow, "rsi_fast": row.rsi_fast, "rsi_trend": row.rsi_trend, "reason": reason}
         elif sell_setup and args.side in {"both", "sell"}:
             entry = row.open if args.entry_price == "open" else row.close
@@ -483,7 +642,10 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             if sell_setup_name == "RSI" and risk > args.max_rsi_risk_points:
                 counts["ignored"] += 1
                 continue
-            trade_target_points = args.rsi_target_points if sell_setup_name == "RSI" else args.target_points
+            if sell_setup_name == "SMC" and risk > args.max_smc_risk_points:
+                counts["ignored"] += 1
+                continue
+            trade_target_points = args.rsi_target_points if sell_setup_name == "RSI" else args.smc_target_points if sell_setup_name == "SMC" else args.target_points
             tp = entry - trade_target_points
             side = "SELL"
             in_pos = True
@@ -492,7 +654,15 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             counts["sell_entries"] += 1
             if sell_setup_name == "RSI":
                 counts["rsi_sell_entries"] += 1
-            reason = "EMA34 dynamic resistance retest with bearish rejection" if sell_setup_name == "EMA" else "RSI50 bearish bias with RSI10 momentum/pullback confirmation"
+            if sell_setup_name == "SMC":
+                counts["smc_sell_entries"] += 1
+            reason = (
+                "EMA34 dynamic resistance retest with bearish rejection"
+                if sell_setup_name == "EMA"
+                else "RSI50 bearish bias with RSI10 momentum/pullback confirmation"
+                if sell_setup_name == "RSI"
+                else "SMC liquidity sweep with CHOCH/CISD and zone confirmation"
+            )
             open_trade = {"timeframe": timeframe, "setup": sell_setup_name, "side": side, "entry_time": ts, "entry": entry, "initial_sl": sl, "target": tp, "risk": risk, "ema_fast": row.ema_fast, "ema_mid": row.ema_mid, "ema_slow": row.ema_slow, "rsi_fast": row.rsi_fast, "rsi_trend": row.rsi_trend, "reason": reason}
 
     return df, pd.DataFrame(trades), counts
@@ -605,6 +775,14 @@ def config_rows(args: argparse.Namespace) -> list[dict[str, object]]:
         {"Setting": "Max RSI Risk Points", "Value": args.max_rsi_risk_points},
         {"Setting": "RSI Trade Side", "Value": args.rsi_trade_side},
         {"Setting": "RSI Min Trade TF Minutes", "Value": args.rsi_min_trade_timeframe_minutes},
+        {"Setting": "SMC Setup Enabled", "Value": args.use_smc_setup},
+        {"Setting": "Trade SMC Setup", "Value": args.trade_smc_setup},
+        {"Setting": "SMC Components", "Value": "AMD/CISD/CRT/TS/OB/BB/FVG/IFVG/CHOCH/levels"},
+        {"Setting": "SMC Target Points", "Value": args.smc_target_points},
+        {"Setting": "Max SMC Risk Points", "Value": args.max_smc_risk_points},
+        {"Setting": "SMC Trade Side", "Value": args.smc_trade_side},
+        {"Setting": "SMC Min Trade TF Minutes", "Value": args.smc_min_trade_timeframe_minutes},
+        {"Setting": "SMC Avoid Trap Zones", "Value": args.smc_avoid_trap_zones},
         {"Setting": "Chop Filter", "Value": args.use_chop_filter},
         {"Setting": "Chop Lookback", "Value": args.chop_lookback},
         {"Setting": "Chop Min EMA Overlaps", "Value": args.chop_min_ema_overlaps},
@@ -637,6 +815,8 @@ def run(args: argparse.Namespace) -> None:
         print(f"Signals: buy={counts['buy_signals']} sell={counts['sell_signals']} | Entries: buy={counts['buy_entries']} sell={counts['sell_entries']} | Ignored={counts['ignored']}")
         if args.use_rsi_setup:
             print(f"RSI Candidates: buy={counts['rsi_buy_candidates']} sell={counts['rsi_sell_candidates']} | RSI Entries: buy={counts['rsi_buy_entries']} sell={counts['rsi_sell_entries']} | Trading={'on' if args.trade_rsi_setup else 'off'}")
+        if args.use_smc_setup:
+            print(f"SMC Candidates: buy={counts['smc_buy_candidates']} sell={counts['smc_sell_candidates']} | SMC Entries: buy={counts['smc_buy_entries']} sell={counts['smc_sell_entries']} | Trading={'on' if args.trade_smc_setup else 'off'}")
         if not trades.empty:
             print_table(f"{timeframe} By Side", group_rows(trades, "side", "Side"))
             print_table(f"{timeframe} By Entry Hour", group_rows(trades.assign(hour=trades["entry_time"].dt.hour), "hour", "Hour"))
@@ -705,6 +885,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-rsi-risk-points", type=float, default=20.0)
     parser.add_argument("--rsi-trade-side", choices=["both", "buy", "sell"], default="sell")
     parser.add_argument("--rsi-min-trade-timeframe-minutes", type=int, default=5)
+    parser.add_argument("--use-smc-setup", type=bool_arg, default=False)
+    parser.add_argument("--trade-smc-setup", type=bool_arg, default=False)
+    parser.add_argument("--smc-swing-lookback", type=int, default=10)
+    parser.add_argument("--smc-sweep-buffer", type=float, default=1.0)
+    parser.add_argument("--smc-break-buffer", type=float, default=0.5)
+    parser.add_argument("--smc-level-buffer", type=float, default=8.0)
+    parser.add_argument("--smc-zone-buffer", type=float, default=1.0)
+    parser.add_argument("--smc-zone-lookback", type=int, default=20)
+    parser.add_argument("--smc-choch-lookback", type=int, default=10)
+    parser.add_argument("--smc-cisd-lookback", type=int, default=3)
+    parser.add_argument("--smc-htf-minutes", type=int, default=15)
+    parser.add_argument("--smc-amd-lookback", type=int, default=12)
+    parser.add_argument("--smc-amd-max-range-points", type=float, default=45.0)
+    parser.add_argument("--smc-displacement-mult", type=float, default=0.8)
+    parser.add_argument("--smc-trap-lookback", type=int, default=8)
+    parser.add_argument("--smc-trap-min-sweeps", type=int, default=3)
+    parser.add_argument("--smc-avoid-trap-zones", type=bool_arg, default=True)
+    parser.add_argument("--smc-require-displacement", type=bool_arg, default=False)
+    parser.add_argument("--smc-target-points", type=float, default=30.0)
+    parser.add_argument("--max-smc-risk-points", type=float, default=20.0)
+    parser.add_argument("--smc-trade-side", choices=["both", "buy", "sell"], default="both")
+    parser.add_argument("--smc-min-trade-timeframe-minutes", type=int, default=5)
     parser.add_argument("--use-bos-filter", type=bool_arg, default=False, help=argparse.SUPPRESS)
     parser.add_argument("--bos-lookback", type=int, default=5, help=argparse.SUPPRESS)
     parser.add_argument("--use-chop-filter", type=bool_arg, default=True)
@@ -721,8 +923,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atr-stop-mult", type=float, default=1.0)
     parser.add_argument("--sl-buffer", type=float, default=0.0)
     parser.add_argument("--entry-price", choices=["open", "close"], default="open")
-    parser.add_argument("--entry-start", default="12:00")
-    parser.add_argument("--entry-end", default="13:59")
+    parser.add_argument("--entry-start", default="9:15")
+    parser.add_argument("--entry-end", default="14:59")
     parser.add_argument("--force-exit", default="15:15")
     parser.add_argument("--side", choices=["both", "buy", "sell"], default="both")
     parser.add_argument("--conservative-intrabar", type=bool_arg, default=True)
