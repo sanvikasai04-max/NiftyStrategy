@@ -46,7 +46,8 @@ minVolumeMult = input.float(0.9, title="Min Volume Multiplier", minval=0.0, step
 entryOnRejectionBreak = input.bool(false, title="Require Close Near Rejection Break")
 closeBreakRangePct = input.float(0.25, title="Close Break Range %", minval=0.0, maxval=1.0, step=0.05)
 
-useSmcSetup = input.bool(false, title="Use SMC AMD/CHOCH/FVG/OB Setup")
+useSmcSetup = input.bool(false, title="Show SMC AMD/CHOCH/FVG/OB Candidates")
+tradeSmcSetup = input.bool(false, title="Trade SMC Setup")
 amdLookback = input.int(20, title="AMD Accumulation Lookback", minval=2)
 amdMaxRangePoints = input.float(120.0, title="AMD Max Range Points", minval=0.1, step=0.5)
 smcSweepLookback = input.int(8, title="SMC Sweep Lookback", minval=1)
@@ -57,10 +58,10 @@ fvgLookback = input.int(5, title="FVG Lookback", minval=1)
 obBuffer = input.float(2.0, title="OB Retest Buffer Points", minval=0.0, step=0.5)
 requireFvgOrOb = input.bool(true, title="Require FVG or OB Confirmation")
 
-useChopFilter = input.bool(true, title="Avoid EMA Overlap Chop")
-chopLookback = input.int(10, title="Chop Lookback Bars", minval=2)
-chopMinEmaOverlaps = input.int(2, title="Chop Min EMA Overlaps", minval=2, maxval=3)
-maxChopOverlapBars = input.int(3, title="Max Choppy Overlap Bars", minval=0)
+useChopFilter = input.bool(false, title="Avoid EMA Overlap Chop")
+chopLookback = input.int(5, title="Chop Lookback Bars", minval=2)
+chopMinEmaOverlaps = input.int(3, title="Chop Min EMA Overlaps", minval=2, maxval=3)
+maxChopOverlapBars = input.int(2, title="Max Choppy Overlap Bars", minval=0)
 
 useSessionFilter = input.bool(true, title="Use Entry Session")
 entryStartHour = input.int(12, title="Entry Start Hour", minval=0, maxval=23)
@@ -178,8 +179,11 @@ smcSellConfirm = recentBearishFvg or bearishObRetest or not requireFvgOrOb
 smcBuySignal = useSmcSetup and allowLong and accumulationOK and recentSweepDown and bullishChoch and buyCandleOK and smcBuyConfirm and chopOK and buySlopeOK and ribbonOK and volumeOK
 smcSellSignal = useSmcSetup and allowShort and accumulationOK and recentSweepUp and bearishChoch and sellCandleOK and smcSellConfirm and chopOK and sellSlopeOK and ribbonOK and volumeOK
 
-buySignal = emaBuySignal or smcBuySignal
-sellSignal = emaSellSignal or smcSellSignal
+buySignal = emaBuySignal or (tradeSmcSetup and smcBuySignal)
+sellSignal = emaSellSignal or (tradeSmcSetup and smcSellSignal)
+
+plotshape(smcBuySignal and not tradeSmcSetup, title="SMC BUY Candidate", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="SMC")
+plotshape(smcSellSignal and not tradeSmcSetup, title="SMC SELL Candidate", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny, text="SMC")
 
 buyEntry = buySignal[1] and inEntrySession and strategy.position_size == 0
 sellEntry = sellSignal[1] and inEntrySession and strategy.position_size == 0

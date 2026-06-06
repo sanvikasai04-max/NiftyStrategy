@@ -311,7 +311,15 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
     df["choppy_overlap_count"] = df["choppy_overlap_bar"].shift(1).rolling(args.chop_lookback).sum()
     df["chop_ok"] = df["choppy_overlap_count"] <= args.max_chop_overlap_bars
     trades: list[dict[str, object]] = []
-    counts = {"buy_signals": 0, "sell_signals": 0, "buy_entries": 0, "sell_entries": 0, "ignored": 0}
+    counts = {
+        "buy_signals": 0,
+        "sell_signals": 0,
+        "smc_buy_signals": 0,
+        "smc_sell_signals": 0,
+        "buy_entries": 0,
+        "sell_entries": 0,
+        "ignored": 0,
+    }
 
     in_pos = False
     side = ""
@@ -386,13 +394,17 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
         sell_ema_setup = signal_on_bar(prev, args, "SELL")
         buy_smc_setup = smc_signal_on_bar(prev, args, "BUY")
         sell_smc_setup = smc_signal_on_bar(prev, args, "SELL")
-        buy_setup = buy_ema_setup or buy_smc_setup
-        sell_setup = sell_ema_setup or sell_smc_setup
+        buy_setup = buy_ema_setup or (args.trade_smc_setup and buy_smc_setup)
+        sell_setup = sell_ema_setup or (args.trade_smc_setup and sell_smc_setup)
 
         if buy_setup:
             counts["buy_signals"] += 1
         if sell_setup:
             counts["sell_signals"] += 1
+        if buy_smc_setup:
+            counts["smc_buy_signals"] += 1
+        if sell_smc_setup:
+            counts["smc_sell_signals"] += 1
 
         if not in_session(ts, args.entry_start, args.entry_end):
             if buy_setup or sell_setup:
@@ -539,6 +551,7 @@ def config_rows(args: argparse.Namespace) -> list[dict[str, object]]:
         {"Setting": "Min Volume Mult", "Value": args.min_volume_mult},
         {"Setting": "Close Break Filter", "Value": args.entry_on_rejection_break},
         {"Setting": "SMC Setup", "Value": args.use_smc_setup},
+        {"Setting": "Trade SMC Setup", "Value": args.trade_smc_setup},
         {"Setting": "AMD Lookback", "Value": args.amd_lookback},
         {"Setting": "AMD Max Range Points", "Value": args.amd_max_range_points},
         {"Setting": "SMC Sweep Lookback", "Value": args.smc_sweep_lookback},
@@ -576,7 +589,7 @@ def run(args: argparse.Namespace) -> None:
         summaries.append(summary_row(timeframe, df, trades, counts))
         print(f"\n=== {timeframe} | EMA {args.fast_ema}/{args.mid_ema}/{args.slow_ema} Bounce ===")
         print(f"Data: {df.datetime.min()} -> {df.datetime.max()} | bars={len(df)}")
-        print(f"Signals: buy={counts['buy_signals']} sell={counts['sell_signals']} | Entries: buy={counts['buy_entries']} sell={counts['sell_entries']} | Ignored={counts['ignored']}")
+        print(f"Signals: buy={counts['buy_signals']} sell={counts['sell_signals']} | SMC candidates: buy={counts['smc_buy_signals']} sell={counts['smc_sell_signals']} | Entries: buy={counts['buy_entries']} sell={counts['sell_entries']} | Ignored={counts['ignored']}")
         if not trades.empty:
             print_table(f"{timeframe} By Setup", group_rows(trades, "setup", "Setup"))
             print_table(f"{timeframe} By Side", group_rows(trades, "side", "Side"))
@@ -629,6 +642,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--entry-on-rejection-break", type=bool_arg, default=False)
     parser.add_argument("--close-break-range-pct", type=float, default=0.25)
     parser.add_argument("--use-smc-setup", type=bool_arg, default=False)
+    parser.add_argument("--trade-smc-setup", type=bool_arg, default=False)
     parser.add_argument("--amd-lookback", type=int, default=20)
     parser.add_argument("--amd-max-range-points", type=float, default=120.0)
     parser.add_argument("--smc-sweep-lookback", type=int, default=8)
@@ -640,10 +654,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-fvg-or-ob", type=bool_arg, default=True)
     parser.add_argument("--use-bos-filter", type=bool_arg, default=False, help=argparse.SUPPRESS)
     parser.add_argument("--bos-lookback", type=int, default=5, help=argparse.SUPPRESS)
-    parser.add_argument("--use-chop-filter", type=bool_arg, default=True)
-    parser.add_argument("--chop-lookback", type=int, default=10)
-    parser.add_argument("--chop-min-ema-overlaps", type=int, choices=[2, 3], default=2)
-    parser.add_argument("--max-chop-overlap-bars", type=int, default=3)
+    parser.add_argument("--use-chop-filter", type=bool_arg, default=False)
+    parser.add_argument("--chop-lookback", type=int, default=5)
+    parser.add_argument("--chop-min-ema-overlaps", type=int, choices=[2, 3], default=3)
+    parser.add_argument("--max-chop-overlap-bars", type=int, default=2)
     parser.add_argument("--swing-lookback", type=int, default=5)
     parser.add_argument("--stop-loss-mode", choices=["signal", "fixed", "swing", "atr", "ema34"], default="signal")
     parser.add_argument("--fixed-stop-points", type=float, default=10.0)
