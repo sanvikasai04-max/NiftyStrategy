@@ -9,8 +9,8 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CSV_NAMES = {
-    "1m": "NIFTY_1m_ANALYSIS.csv",
-    "5m": "NIFTY_5m_ANALYSIS.csv",
+    "1m": "nifty_1min_clean.csv",
+    "5m": "nifty_5min_clean.csv",
     "10m": "NIFTY_10m_ANALYSIS.csv",
     "15m": "NIFTY_15m_ANALYSIS.csv",
     "1h": "NIFTY_1h_ANALYSIS.csv",
@@ -219,6 +219,18 @@ def in_session(ts: pd.Timestamp, start_text: str, end_text: str) -> bool:
     return after_start and before_end
 
 
+def setup_entry_session_ok(ts: pd.Timestamp, setup: str, side: str, args: argparse.Namespace) -> bool:
+    if setup == "EMA" and side == "BUY":
+        return in_session(ts, args.ema_buy_entry_start, args.ema_buy_entry_end)
+    if setup == "EMA" and side == "SELL":
+        return in_session(ts, args.ema_sell_entry_start, args.ema_sell_entry_end)
+    if setup == "RSI":
+        return in_session(ts, args.rsi_entry_start, args.rsi_entry_end)
+    if setup == "SMC":
+        return in_session(ts, args.smc_entry_start, args.smc_entry_end)
+    return True
+
+
 def force_exit_bar(ts: pd.Timestamp, exit_text: str) -> bool:
     hour, minute = parse_clock(exit_text)
     return ts.hour > hour or (ts.hour == hour and ts.minute >= minute)
@@ -409,6 +421,11 @@ def rsi_signal_on_bar(row: pd.Series, args: argparse.Namespace, side: str) -> bo
             return False
     if not rsi_price_action_ok(row, args, side):
         return False
+    if args.rsi_avoid_displacement_candle:
+        if side == "BUY" and bool(row.displacement_buy):
+            return False
+        if side == "SELL" and bool(row.displacement_sell):
+            return False
 
     if side == "BUY":
         trend_ok = row.rsi_trend >= 50 + args.rsi_trend_buffer
@@ -595,6 +612,15 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
                 counts["ignored"] += 1
             continue
 
+        if buy_setup and not setup_entry_session_ok(ts, buy_setup_name, "BUY", args):
+            counts["ignored"] += 1
+            buy_setup = False
+        if sell_setup and not setup_entry_session_ok(ts, sell_setup_name, "SELL", args):
+            counts["ignored"] += 1
+            sell_setup = False
+        if not buy_setup and not sell_setup:
+            continue
+
         swing_start = max(0, i - args.swing_lookback)
         swing_window = df.iloc[swing_start:i]
         if swing_window.empty:
@@ -607,10 +633,16 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             if risk <= 0:
                 counts["ignored"] += 1
                 continue
+            if buy_setup_name == "EMA" and risk < args.min_ema_buy_risk_points:
+                counts["ignored"] += 1
+                continue
             if buy_setup_name == "RSI" and risk > args.max_rsi_risk_points:
                 counts["ignored"] += 1
                 continue
             if buy_setup_name == "SMC" and risk > args.max_smc_risk_points:
+                counts["ignored"] += 1
+                continue
+            if buy_setup_name == "SMC" and risk < args.min_smc_risk_points:
                 counts["ignored"] += 1
                 continue
             trade_target_points = args.rsi_target_points if buy_setup_name == "RSI" else args.smc_target_points if buy_setup_name == "SMC" else args.target_points
@@ -639,10 +671,16 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             if risk <= 0:
                 counts["ignored"] += 1
                 continue
+            if sell_setup_name == "EMA" and risk < args.min_ema_sell_risk_points:
+                counts["ignored"] += 1
+                continue
             if sell_setup_name == "RSI" and risk > args.max_rsi_risk_points:
                 counts["ignored"] += 1
                 continue
             if sell_setup_name == "SMC" and risk > args.max_smc_risk_points:
+                counts["ignored"] += 1
+                continue
+            if sell_setup_name == "SMC" and risk < args.min_smc_risk_points:
                 counts["ignored"] += 1
                 continue
             trade_target_points = args.rsi_target_points if sell_setup_name == "RSI" else args.smc_target_points if sell_setup_name == "SMC" else args.target_points
@@ -756,6 +794,8 @@ def config_rows(args: argparse.Namespace) -> list[dict[str, object]]:
         {"Setting": "Min Wick/Range %", "Value": args.min_wick_range_pct},
         {"Setting": "Low Risk Retest", "Value": args.use_low_risk_retest},
         {"Setting": "Max Signal Risk Points", "Value": args.max_signal_risk_points},
+        {"Setting": "Min EMA Buy Risk Points", "Value": args.min_ema_buy_risk_points},
+        {"Setting": "Min EMA Sell Risk Points", "Value": args.min_ema_sell_risk_points},
         {"Setting": "MA High/Low Channel", "Value": args.use_ma_channel},
         {"Setting": "Slope Filter", "Value": args.use_slope_filter},
         {"Setting": "Slope Lookback", "Value": args.slope_lookback},
@@ -773,16 +813,21 @@ def config_rows(args: argparse.Namespace) -> list[dict[str, object]]:
         {"Setting": "RSI EMA Trend Filter", "Value": args.rsi_use_ema_trend_filter},
         {"Setting": "RSI Target Points", "Value": args.rsi_target_points},
         {"Setting": "Max RSI Risk Points", "Value": args.max_rsi_risk_points},
+        {"Setting": "RSI Avoid Displacement Candle", "Value": args.rsi_avoid_displacement_candle},
         {"Setting": "RSI Trade Side", "Value": args.rsi_trade_side},
         {"Setting": "RSI Min Trade TF Minutes", "Value": args.rsi_min_trade_timeframe_minutes},
+        {"Setting": "RSI Entry Window", "Value": f"{args.rsi_entry_start}-{args.rsi_entry_end}"},
         {"Setting": "SMC Setup Enabled", "Value": args.use_smc_setup},
         {"Setting": "Trade SMC Setup", "Value": args.trade_smc_setup},
         {"Setting": "SMC Components", "Value": "AMD/CISD/CRT/TS/OB/BB/FVG/IFVG/CHOCH/levels"},
         {"Setting": "SMC Target Points", "Value": args.smc_target_points},
         {"Setting": "Max SMC Risk Points", "Value": args.max_smc_risk_points},
+        {"Setting": "Min SMC Risk Points", "Value": args.min_smc_risk_points},
         {"Setting": "SMC Trade Side", "Value": args.smc_trade_side},
         {"Setting": "SMC Min Trade TF Minutes", "Value": args.smc_min_trade_timeframe_minutes},
         {"Setting": "SMC Avoid Trap Zones", "Value": args.smc_avoid_trap_zones},
+        {"Setting": "SMC Require Displacement", "Value": args.smc_require_displacement},
+        {"Setting": "SMC Entry Window", "Value": f"{args.smc_entry_start}-{args.smc_entry_end}"},
         {"Setting": "Chop Filter", "Value": args.use_chop_filter},
         {"Setting": "Chop Lookback", "Value": args.chop_lookback},
         {"Setting": "Chop Min EMA Overlaps", "Value": args.chop_min_ema_overlaps},
@@ -794,6 +839,8 @@ def config_rows(args: argparse.Namespace) -> list[dict[str, object]]:
         {"Setting": "Trail Lock Points", "Value": args.trail_lock_points},
         {"Setting": "Entry Price", "Value": args.entry_price},
         {"Setting": "Entry Window", "Value": f"{args.entry_start}-{args.entry_end}"},
+        {"Setting": "EMA Buy Entry Window", "Value": f"{args.ema_buy_entry_start}-{args.ema_buy_entry_end}"},
+        {"Setting": "EMA Sell Entry Window", "Value": f"{args.ema_sell_entry_start}-{args.ema_sell_entry_end}"},
         {"Setting": "Force Exit", "Value": args.force_exit},
     ]
 
@@ -855,6 +902,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-wick-range-pct", type=float, default=0.25)
     parser.add_argument("--use-low-risk-retest", type=bool_arg, default=True)
     parser.add_argument("--max-signal-risk-points", type=float, default=7.0)
+    parser.add_argument("--min-ema-buy-risk-points", type=float, default=10.0)
+    parser.add_argument("--min-ema-sell-risk-points", type=float, default=5.0)
     parser.add_argument("--use-ma-channel", type=bool_arg, default=False)
     parser.add_argument("--use-slope-filter", type=bool_arg, default=True)
     parser.add_argument("--slope-lookback", type=int, default=5)
@@ -883,8 +932,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rsi-use-ema-trend-filter", type=bool_arg, default=True)
     parser.add_argument("--rsi-target-points", type=float, default=30.0)
     parser.add_argument("--max-rsi-risk-points", type=float, default=20.0)
+    parser.add_argument("--rsi-avoid-displacement-candle", type=bool_arg, default=True)
     parser.add_argument("--rsi-trade-side", choices=["both", "buy", "sell"], default="sell")
     parser.add_argument("--rsi-min-trade-timeframe-minutes", type=int, default=5)
+    parser.add_argument("--rsi-entry-start", default="9:15")
+    parser.add_argument("--rsi-entry-end", default="14:59")
     parser.add_argument("--use-smc-setup", type=bool_arg, default=False)
     parser.add_argument("--trade-smc-setup", type=bool_arg, default=False)
     parser.add_argument("--smc-swing-lookback", type=int, default=10)
@@ -902,11 +954,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--smc-trap-lookback", type=int, default=8)
     parser.add_argument("--smc-trap-min-sweeps", type=int, default=3)
     parser.add_argument("--smc-avoid-trap-zones", type=bool_arg, default=True)
-    parser.add_argument("--smc-require-displacement", type=bool_arg, default=False)
+    parser.add_argument("--smc-require-displacement", type=bool_arg, default=True)
     parser.add_argument("--smc-target-points", type=float, default=30.0)
     parser.add_argument("--max-smc-risk-points", type=float, default=20.0)
-    parser.add_argument("--smc-trade-side", choices=["both", "buy", "sell"], default="both")
+    parser.add_argument("--min-smc-risk-points", type=float, default=16.0)
+    parser.add_argument("--smc-trade-side", choices=["both", "buy", "sell"], default="sell")
     parser.add_argument("--smc-min-trade-timeframe-minutes", type=int, default=5)
+    parser.add_argument("--smc-entry-start", default="9:15")
+    parser.add_argument("--smc-entry-end", default="14:59")
     parser.add_argument("--use-bos-filter", type=bool_arg, default=False, help=argparse.SUPPRESS)
     parser.add_argument("--bos-lookback", type=int, default=5, help=argparse.SUPPRESS)
     parser.add_argument("--use-chop-filter", type=bool_arg, default=True)
@@ -924,7 +979,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sl-buffer", type=float, default=0.0)
     parser.add_argument("--entry-price", choices=["open", "close"], default="open")
     parser.add_argument("--entry-start", default="9:15")
-    parser.add_argument("--entry-end", default="14:59")
+    parser.add_argument("--entry-end", default="15:30")
+    parser.add_argument("--ema-buy-entry-start", default="9:15")
+    parser.add_argument("--ema-buy-entry-end", default="15:30")
+    parser.add_argument("--ema-sell-entry-start", default="9:15")
+    parser.add_argument("--ema-sell-entry-end", default="15:30")
     parser.add_argument("--force-exit", default="15:15")
     parser.add_argument("--side", choices=["both", "buy", "sell"], default="both")
     parser.add_argument("--conservative-intrabar", type=bool_arg, default=True)
