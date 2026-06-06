@@ -16,6 +16,9 @@ targetPoints = input.float(50.0, title="Target Points", minval=0.1, step=0.5)
 swingLookback = input.int(5, title="Swing SL Lookback", minval=1)
 stopLossMode = input.string("Signal Candle", title="Stop Loss Mode", options=["Signal Candle", "Fixed Points", "Swing", "ATR", "EMA 34"])
 fixedStopPoints = input.float(10.0, title="Fixed Stop Points", minval=0.1, step=0.5)
+useTrailingStop = input.bool(true, title="Use 30-Point Profit Lock")
+trailActivatePoints = input.float(30.0, title="Profit Lock Activate Points", minval=0.1, step=0.5)
+trailLockPoints = input.float(30.0, title="Profit Lock Points", minval=0.1, step=0.5)
 atrStopLen = input.int(14, title="ATR Stop Length", minval=1)
 atrStopMult = input.float(1.0, title="ATR Stop Multiplier", minval=0.1, step=0.1)
 slBufferPoints = input.float(0.0, title="SL Buffer Points", minval=0.0, step=0.05)
@@ -156,6 +159,8 @@ sellSelectedSL = stopLossMode == "Fixed Points" ? sellFixedSL : stopLossMode == 
 var float activeSL = na
 var float activeTP = na
 var float activeRisk = na
+var float activeEntry = na
+var float bestMove = na
 
 if buyEntry
     risk = open - buySelectedSL
@@ -164,6 +169,8 @@ if buyEntry
         activeSL := buySelectedSL
         activeRisk := risk
         activeTP := open + targetPoints
+        activeEntry := open
+        bestMove := 0.0
         strategy.entry("EMA BUY", strategy.long)
         if showLabels
             label.new(bar_index, low - labelOffset, "BUY\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_up, color=color.rgb(70, 150, 95), textcolor=color.white, size=size.small)
@@ -175,24 +182,32 @@ if sellEntry
         activeSL := sellSelectedSL
         activeRisk := risk
         activeTP := open - targetPoints
+        activeEntry := open
+        bestMove := 0.0
         strategy.entry("EMA SELL", strategy.short)
         if showLabels
             label.new(bar_index, high + labelOffset, "SELL\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_down, color=color.rgb(190, 75, 75), textcolor=color.white, size=size.small)
 
 if strategy.position_size > 0
-    strategy.exit("BUY EXIT", "EMA BUY", stop=activeSL, limit=activeTP)
+    bestMove := na(bestMove) ? high - activeEntry : math.max(bestMove, high - activeEntry)
+    profitLockActive = useTrailingStop and bestMove >= trailActivatePoints
+    activeExitSL = profitLockActive ? math.max(activeSL, activeEntry + trailLockPoints) : activeSL
+    strategy.exit("BUY EXIT", "EMA BUY", stop=activeExitSL, limit=activeTP)
     if close <= emaMid
         strategy.close("EMA BUY", comment="Close Below EMA34")
 
 if strategy.position_size < 0
-    strategy.exit("SELL EXIT", "EMA SELL", stop=activeSL, limit=activeTP)
+    bestMove := na(bestMove) ? activeEntry - low : math.max(bestMove, activeEntry - low)
+    profitLockActive = useTrailingStop and bestMove >= trailActivatePoints
+    activeExitSL = profitLockActive ? math.min(activeSL, activeEntry - trailLockPoints) : activeSL
+    strategy.exit("SELL EXIT", "EMA SELL", stop=activeExitSL, limit=activeTP)
     if close >= emaMid
         strategy.close("EMA SELL", comment="Close Above EMA34")
 
 if forceExit and strategy.position_size != 0
     strategy.close_all(comment="Day Exit")
 
-plot(strategy.position_size != 0 ? activeSL : na, title="Active SL", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 ? activeSL : na, title="Initial SL", color=color.red, style=plot.style_linebr, linewidth=2)
 plot(strategy.position_size != 0 ? activeTP : na, title="Active Target", color=color.green, style=plot.style_linebr, linewidth=2)
 
 alertcondition(buyEntry, title="EMA 14/34/90 BUY ALERT", message="EMA34 dynamic support retest with bullish rejection and trend-quality filters")

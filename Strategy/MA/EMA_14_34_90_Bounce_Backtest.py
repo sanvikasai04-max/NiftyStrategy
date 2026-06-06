@@ -284,21 +284,22 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
                 hit_tp = row.high >= tp
                 close_ema34_exit = row.close <= row.ema_mid
                 day_exit = force_exit_bar(ts, args.force_exit)
+                profit_lock_active = args.use_trailing_stop and best_move >= args.trail_activate_points
                 exit_reason = None
                 exit_price = np.nan
-                if args.conservative_intrabar and hit_sl:
-                    exit_reason, exit_price = "SL", sl
-                elif hit_tp:
+                if hit_tp:
                     exit_reason, exit_price = "TARGET", tp
+                elif args.conservative_intrabar and hit_sl:
+                    exit_reason, exit_price = "SL", sl
                 elif hit_sl:
                     exit_reason, exit_price = "SL", sl
                 elif close_ema34_exit:
-                    exit_reason, exit_price = "CLOSE BELOW EMA34", row.close
+                    exit_reason, exit_price = ("PROFIT LOCK", entry + args.trail_lock_points) if profit_lock_active else ("CLOSE BELOW EMA34", row.close)
                 elif day_exit:
-                    exit_reason, exit_price = "DAY", row.close
+                    exit_reason, exit_price = ("PROFIT LOCK", entry + args.trail_lock_points) if profit_lock_active else ("DAY", row.close)
                 if exit_reason:
                     pnl = exit_price - entry
-                    open_trade.update({"exit_time": ts, "exit": exit_price, "pnl": pnl, "profit_risk_multiple": pnl / risk if risk else np.nan, "best_move": best_move, "bars": i - entry_bar, "exit_type": exit_reason})
+                    open_trade.update({"exit_time": ts, "exit": exit_price, "pnl": pnl, "profit_risk_multiple": pnl / risk if risk else np.nan, "best_move": best_move, "final_sl": sl, "bars": i - entry_bar, "exit_type": exit_reason})
                     trades.append(open_trade)
                     in_pos = False
                     open_trade = None
@@ -308,21 +309,22 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
                 hit_tp = row.low <= tp
                 close_ema34_exit = row.close >= row.ema_mid
                 day_exit = force_exit_bar(ts, args.force_exit)
+                profit_lock_active = args.use_trailing_stop and best_move >= args.trail_activate_points
                 exit_reason = None
                 exit_price = np.nan
-                if args.conservative_intrabar and hit_sl:
-                    exit_reason, exit_price = "SL", sl
-                elif hit_tp:
+                if hit_tp:
                     exit_reason, exit_price = "TARGET", tp
+                elif args.conservative_intrabar and hit_sl:
+                    exit_reason, exit_price = "SL", sl
                 elif hit_sl:
                     exit_reason, exit_price = "SL", sl
                 elif close_ema34_exit:
-                    exit_reason, exit_price = "CLOSE ABOVE EMA34", row.close
+                    exit_reason, exit_price = ("PROFIT LOCK", entry - args.trail_lock_points) if profit_lock_active else ("CLOSE ABOVE EMA34", row.close)
                 elif day_exit:
-                    exit_reason, exit_price = "DAY", row.close
+                    exit_reason, exit_price = ("PROFIT LOCK", entry - args.trail_lock_points) if profit_lock_active else ("DAY", row.close)
                 if exit_reason:
                     pnl = entry - exit_price
-                    open_trade.update({"exit_time": ts, "exit": exit_price, "pnl": pnl, "profit_risk_multiple": pnl / risk if risk else np.nan, "best_move": best_move, "bars": i - entry_bar, "exit_type": exit_reason})
+                    open_trade.update({"exit_time": ts, "exit": exit_price, "pnl": pnl, "profit_risk_multiple": pnl / risk if risk else np.nan, "best_move": best_move, "final_sl": sl, "bars": i - entry_bar, "exit_type": exit_reason})
                     trades.append(open_trade)
                     in_pos = False
                     open_trade = None
@@ -485,6 +487,9 @@ def config_rows(args: argparse.Namespace) -> list[dict[str, object]]:
         {"Setting": "Max Choppy Overlap Bars", "Value": args.max_chop_overlap_bars},
         {"Setting": "Stop Loss Mode", "Value": args.stop_loss_mode},
         {"Setting": "Fixed Stop Points", "Value": args.fixed_stop_points},
+        {"Setting": "Trailing Stop", "Value": args.use_trailing_stop},
+        {"Setting": "Trail Activate Points", "Value": args.trail_activate_points},
+        {"Setting": "Trail Lock Points", "Value": args.trail_lock_points},
         {"Setting": "Entry Price", "Value": args.entry_price},
         {"Setting": "Entry Window", "Value": f"{args.entry_start}-{args.entry_end}"},
         {"Setting": "Force Exit", "Value": args.force_exit},
@@ -565,6 +570,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--swing-lookback", type=int, default=5)
     parser.add_argument("--stop-loss-mode", choices=["signal", "fixed", "swing", "atr", "ema34"], default="signal")
     parser.add_argument("--fixed-stop-points", type=float, default=10.0)
+    parser.add_argument("--use-trailing-stop", type=bool_arg, default=True)
+    parser.add_argument("--trail-activate-points", type=float, default=30.0)
+    parser.add_argument("--trail-lock-points", type=float, default=30.0)
     parser.add_argument("--atr-stop-len", type=int, default=14)
     parser.add_argument("--atr-stop-mult", type=float, default=1.0)
     parser.add_argument("--sl-buffer", type=float, default=0.0)
