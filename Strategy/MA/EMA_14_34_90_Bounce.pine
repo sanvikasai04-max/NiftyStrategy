@@ -46,6 +46,26 @@ minVolumeMult = input.float(0.9, title="Min Volume Multiplier", minval=0.0, step
 entryOnRejectionBreak = input.bool(false, title="Require Close Near Rejection Break")
 closeBreakRangePct = input.float(0.25, title="Close Break Range %", minval=0.0, maxval=1.0, step=0.05)
 
+useRsiSetup = input.bool(false, title="Show RSI Momentum Candidates")
+tradeRsiSetup = input.bool(false, title="Trade RSI Setup")
+rsiFastLen = input.int(10, title="RSI Fast Length", minval=1)
+rsiTrendLen = input.int(50, title="RSI Trend Length", minval=1)
+rsiTrendBuffer = input.float(5.0, title="RSI 50 Trend Buffer", minval=0.0, step=0.1)
+rsiBuyMomentumLevel = input.float(60.0, title="RSI Buy Momentum Level", minval=1.0, maxval=99.0, step=0.5)
+rsiBuyPullbackLevel = input.float(40.0, title="RSI Buy Pullback Level", minval=1.0, maxval=99.0, step=0.5)
+rsiSellMomentumLevel = input.float(40.0, title="RSI Sell Momentum Level", minval=1.0, maxval=99.0, step=0.5)
+rsiSellPullbackLevel = input.float(60.0, title="RSI Sell Pullback Level", minval=1.0, maxval=99.0, step=0.5)
+rsiRetestBars = input.int(3, title="RSI Retest Bars", minval=1)
+rsiBreakoutLookback = input.int(3, title="RSI Breakout Lookback", minval=1)
+rsiBreakoutBuffer = input.float(0.0, title="RSI Breakout Buffer Points", minval=0.0, step=0.05)
+rsiPriceActionConfirm = input.string("Breakout", title="RSI Price Action Confirmation", options=["None", "Breakout", "Rejection", "Either"])
+rsiUseEmaTrendFilter = input.bool(true, title="RSI Use EMA Trend Filter")
+rsiTargetPoints = input.float(30.0, title="RSI Target Points", minval=0.1, step=0.5)
+maxRsiRiskPoints = input.float(20.0, title="Max RSI Risk Points", minval=0.1, step=0.5)
+rsiTradeLong = input.bool(false, title="Trade RSI Long")
+rsiTradeShort = input.bool(true, title="Trade RSI Short")
+rsiMinTradeMinutes = input.int(5, title="RSI Min Trade Timeframe Minutes", minval=1)
+
 useChopFilter = input.bool(true, title="Avoid EMA Overlap Chop")
 chopLookback = input.int(10, title="Chop Lookback Bars", minval=2)
 chopMinEmaOverlaps = input.int(2, title="Chop Min EMA Overlaps", minval=2, maxval=3)
@@ -82,6 +102,8 @@ emaFastSlope = (emaFast - emaFast[slopeLookback]) / slopeLookback
 ribbonWidth = math.abs(emaFast - emaSlow)
 ribbonWidthAvg = ta.sma(ribbonWidth, ribbonLookback)
 volumeAvg = ta.sma(volume, volumeLookback)
+rsiFast = ta.rsi(close, rsiFastLen)
+rsiTrend = ta.rsi(close, rsiTrendLen)
 
 candleRange = high - low
 body = math.max(math.abs(close - open), syminfo.mintick)
@@ -136,11 +158,38 @@ sellBreakOK = not entryOnRejectionBreak or close < low + candleRange * closeBrea
 buyPriceActionOK = buyRejectionOK or buyLowRiskRetestOK
 sellPriceActionOK = sellRejectionOK or sellLowRiskRetestOK
 
-buySignal = allowLong and buyStack and buyBounce and buyCandleOK and buyBreakOK and buyPriceActionOK and distanceOK and chopOK and buySlopeOK and ribbonOK and volumeOK
-sellSignal = allowShort and sellStack and sellBounce and sellCandleOK and sellBreakOK and sellPriceActionOK and distanceOK and chopOK and sellSlopeOK and ribbonOK and volumeOK
+emaBuySignal = allowLong and buyStack and buyBounce and buyCandleOK and buyBreakOK and buyPriceActionOK and distanceOK and chopOK and buySlopeOK and ribbonOK and volumeOK
+emaSellSignal = allowShort and sellStack and sellBounce and sellCandleOK and sellBreakOK and sellPriceActionOK and distanceOK and chopOK and sellSlopeOK and ribbonOK and volumeOK
+
+rsiBuyTrendOK = rsiTrend >= 50 + rsiTrendBuffer
+rsiSellTrendOK = rsiTrend <= 50 - rsiTrendBuffer
+rsiBuyMomentum = rsiFast[1] <= rsiBuyMomentumLevel and rsiFast > rsiBuyMomentumLevel
+rsiBuyPullback = ta.lowest(rsiFast[1], rsiRetestBars) <= rsiBuyPullbackLevel and rsiFast > rsiFast[1] and rsiFast >= rsiBuyPullbackLevel
+rsiSellMomentum = rsiFast[1] >= rsiSellMomentumLevel and rsiFast < rsiSellMomentumLevel
+rsiSellPullback = ta.highest(rsiFast[1], rsiRetestBars) >= rsiSellPullbackLevel and rsiFast < rsiFast[1] and rsiFast <= rsiSellPullbackLevel
+rsiBreakHigh = ta.highest(high[1], rsiBreakoutLookback)
+rsiBreakLow = ta.lowest(low[1], rsiBreakoutLookback)
+rsiBuyBreakoutOK = close > rsiBreakHigh + rsiBreakoutBuffer
+rsiSellBreakoutOK = close < rsiBreakLow - rsiBreakoutBuffer
+rsiBuyRejectionConfirm = close > open and buyRejectionOK
+rsiSellRejectionConfirm = close < open and sellRejectionOK
+rsiBuyPriceActionOK = rsiPriceActionConfirm == "None" ? true : rsiPriceActionConfirm == "Breakout" ? rsiBuyBreakoutOK : rsiPriceActionConfirm == "Rejection" ? rsiBuyRejectionConfirm : rsiBuyBreakoutOK or rsiBuyRejectionConfirm
+rsiSellPriceActionOK = rsiPriceActionConfirm == "None" ? true : rsiPriceActionConfirm == "Breakout" ? rsiSellBreakoutOK : rsiPriceActionConfirm == "Rejection" ? rsiSellRejectionConfirm : rsiSellBreakoutOK or rsiSellRejectionConfirm
+rsiBuyEmaTrendOK = not rsiUseEmaTrendFilter or (buyStack and buySlopeOK and ribbonOK)
+rsiSellEmaTrendOK = not rsiUseEmaTrendFilter or (sellStack and sellSlopeOK and ribbonOK)
+
+rsiBuyCandidate = useRsiSetup and allowLong and rsiBuyTrendOK and (rsiBuyMomentum or rsiBuyPullback) and rsiBuyPriceActionOK and rsiBuyEmaTrendOK and chopOK
+rsiSellCandidate = useRsiSetup and allowShort and rsiSellTrendOK and (rsiSellMomentum or rsiSellPullback) and rsiSellPriceActionOK and rsiSellEmaTrendOK and chopOK
+chartMinutes = timeframe.in_seconds(timeframe.period) / 60.0
+rsiTradeTimeframeOK = chartMinutes >= rsiMinTradeMinutes
+
+buySignal = emaBuySignal or (tradeRsiSetup and rsiTradeLong and rsiTradeTimeframeOK and rsiBuyCandidate)
+sellSignal = emaSellSignal or (tradeRsiSetup and rsiTradeShort and rsiTradeTimeframeOK and rsiSellCandidate)
 
 buyEntry = buySignal[1] and inEntrySession and strategy.position_size == 0
 sellEntry = sellSignal[1] and inEntrySession and strategy.position_size == 0
+buyEntrySetup = emaBuySignal[1] ? "EMA" : "RSI"
+sellEntrySetup = emaSellSignal[1] ? "EMA" : "RSI"
 
 buySwingSL = ta.lowest(low[1], swingLookback) - slBufferPoints
 sellSwingSL = ta.highest(high[1], swingLookback) + slBufferPoints
@@ -164,29 +213,29 @@ var float bestMove = na
 
 if buyEntry
     risk = open - buySelectedSL
-    riskOK = risk > 0
+    riskOK = risk > 0 and (buyEntrySetup == "EMA" or risk <= maxRsiRiskPoints)
     if riskOK
         activeSL := buySelectedSL
         activeRisk := risk
-        activeTP := open + targetPoints
+        activeTP := open + (buyEntrySetup == "RSI" ? rsiTargetPoints : targetPoints)
         activeEntry := open
         bestMove := 0.0
         strategy.entry("EMA BUY", strategy.long)
         if showLabels
-            label.new(bar_index, low - labelOffset, "BUY\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_up, color=color.rgb(70, 150, 95), textcolor=color.white, size=size.small)
+            label.new(bar_index, low - labelOffset, buyEntrySetup + " BUY\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_up, color=color.rgb(70, 150, 95), textcolor=color.white, size=size.small)
 
 if sellEntry
     risk = sellSelectedSL - open
-    riskOK = risk > 0
+    riskOK = risk > 0 and (sellEntrySetup == "EMA" or risk <= maxRsiRiskPoints)
     if riskOK
         activeSL := sellSelectedSL
         activeRisk := risk
-        activeTP := open - targetPoints
+        activeTP := open - (sellEntrySetup == "RSI" ? rsiTargetPoints : targetPoints)
         activeEntry := open
         bestMove := 0.0
         strategy.entry("EMA SELL", strategy.short)
         if showLabels
-            label.new(bar_index, high + labelOffset, "SELL\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_down, color=color.rgb(190, 75, 75), textcolor=color.white, size=size.small)
+            label.new(bar_index, high + labelOffset, sellEntrySetup + " SELL\nE: " + str.tostring(open, format.mintick) + "\nSL: " + str.tostring(activeSL, format.mintick) + "\nT: " + str.tostring(activeTP, format.mintick), style=label.style_label_down, color=color.rgb(190, 75, 75), textcolor=color.white, size=size.small)
 
 if strategy.position_size > 0
     bestMove := na(bestMove) ? high - activeEntry : math.max(bestMove, high - activeEntry)
@@ -209,6 +258,10 @@ if forceExit and strategy.position_size != 0
 
 plot(strategy.position_size != 0 ? activeSL : na, title="Initial SL", color=color.red, style=plot.style_linebr, linewidth=2)
 plot(strategy.position_size != 0 ? activeTP : na, title="Active Target", color=color.green, style=plot.style_linebr, linewidth=2)
+plotshape(rsiBuyCandidate, title="RSI BUY Candidate", style=shape.triangleup, location=location.belowbar, color=color.rgb(40, 165, 120), size=size.tiny, text="RSI")
+plotshape(rsiSellCandidate, title="RSI SELL Candidate", style=shape.triangledown, location=location.abovebar, color=color.rgb(220, 95, 80), size=size.tiny, text="RSI")
 
 alertcondition(buyEntry, title="EMA 14/34/90 BUY ALERT", message="EMA34 dynamic support retest with bullish rejection and trend-quality filters")
 alertcondition(sellEntry, title="EMA 14/34/90 SELL ALERT", message="EMA34 dynamic resistance retest with bearish rejection and trend-quality filters")
+alertcondition(rsiBuyCandidate, title="RSI BUY CANDIDATE ALERT", message="RSI50 bullish bias with RSI10 momentum or pullback confirmation")
+alertcondition(rsiSellCandidate, title="RSI SELL CANDIDATE ALERT", message="RSI50 bearish bias with RSI10 momentum or pullback confirmation")

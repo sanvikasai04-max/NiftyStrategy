@@ -100,7 +100,28 @@ def add_indicators(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
     out["bullish_engulfing"] = (out["close"] > out["open"]) & (prev_close < prev_open) & (out["open"] <= prev_close) & (out["close"] >= prev_open)
     out["bearish_engulfing"] = (out["close"] < out["open"]) & (prev_close > prev_open) & (out["open"] >= prev_close) & (out["close"] <= prev_open)
     out["distance_from_fast"] = (out["close"] - out["ema_fast"]).abs()
+    out["rsi_fast"] = rsi(out["close"], args.rsi_fast_len)
+    out["rsi_trend"] = rsi(out["close"], args.rsi_trend_len)
+    out["rsi_fast_prev"] = out["rsi_fast"].shift(1)
+    out["rsi_prev_low"] = out["rsi_fast"].shift(1).rolling(args.rsi_retest_bars).min()
+    out["rsi_prev_high"] = out["rsi_fast"].shift(1).rolling(args.rsi_retest_bars).max()
+    out["rsi_break_high"] = out["high"].shift(1).rolling(args.rsi_breakout_lookback).max()
+    out["rsi_break_low"] = out["low"].shift(1).rolling(args.rsi_breakout_lookback).min()
     return out
+
+
+def rsi(close: pd.Series, length: int) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    value = 100 - (100 / (1 + rs))
+    value = value.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    value = value.mask((avg_gain == 0) & (avg_loss > 0), 0.0)
+    value = value.mask((avg_gain == 0) & (avg_loss == 0), 50.0)
+    return value
 
 
 def parse_clock(value: str) -> tuple[int, int]:
@@ -119,6 +140,24 @@ def in_session(ts: pd.Timestamp, start_text: str, end_text: str) -> bool:
 def force_exit_bar(ts: pd.Timestamp, exit_text: str) -> bool:
     hour, minute = parse_clock(exit_text)
     return ts.hour > hour or (ts.hour == hour and ts.minute >= minute)
+
+
+def timeframe_minutes(timeframe: str) -> int:
+    if timeframe.endswith("m"):
+        return int(timeframe[:-1])
+    if timeframe.endswith("h"):
+        return int(timeframe[:-1]) * 60
+    raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+
+def rsi_trade_allowed(timeframe: str, side: str, args: argparse.Namespace) -> bool:
+    if timeframe_minutes(timeframe) < args.rsi_min_trade_timeframe_minutes:
+        return False
+    if args.rsi_trade_side == "buy" and side != "BUY":
+        return False
+    if args.rsi_trade_side == "sell" and side != "SELL":
+        return False
+    return True
 
 
 def selected_stop(side: str, entry: float, row: pd.Series, prev: pd.Series, swing_window: pd.DataFrame, args: argparse.Namespace) -> float:
@@ -251,6 +290,56 @@ def signal_on_bar(row: pd.Series, args: argparse.Namespace, side: str) -> bool:
     return bool(stack_ok and bounce_ok and candle_ok and break_ok and price_action_ok)
 
 
+def rsi_price_action_ok(row: pd.Series, args: argparse.Namespace, side: str) -> bool:
+    if args.rsi_price_action_confirm == "none":
+        return True
+
+    if side == "BUY":
+        breakout_ok = not pd.isna(row.rsi_break_high) and row.close > row.rsi_break_high + args.rsi_breakout_buffer
+        rejection_confirm = row.close > row.open and rejection_ok(row, args, side)
+    else:
+        breakout_ok = not pd.isna(row.rsi_break_low) and row.close < row.rsi_break_low - args.rsi_breakout_buffer
+        rejection_confirm = row.close < row.open and rejection_ok(row, args, side)
+
+    if args.rsi_price_action_confirm == "breakout":
+        return bool(breakout_ok)
+    if args.rsi_price_action_confirm == "rejection":
+        return bool(rejection_confirm)
+    return bool(breakout_ok or rejection_confirm)
+
+
+def rsi_signal_on_bar(row: pd.Series, args: argparse.Namespace, side: str) -> bool:
+    if not args.use_rsi_setup:
+        return False
+    needed = [row.rsi_fast, row.rsi_fast_prev, row.rsi_trend, row.rsi_prev_low, row.rsi_prev_high]
+    if any(pd.isna(value) for value in needed):
+        return False
+    if args.use_chop_filter and not bool(row.chop_ok):
+        return False
+    if args.rsi_use_ema_trend_filter:
+        if side == "BUY":
+            if not bool(row.ema_fast > row.ema_mid > row.ema_slow):
+                return False
+        else:
+            if not bool(row.ema_fast < row.ema_mid < row.ema_slow):
+                return False
+        if not trend_quality_ok(row, args, side):
+            return False
+    if not rsi_price_action_ok(row, args, side):
+        return False
+
+    if side == "BUY":
+        trend_ok = row.rsi_trend >= 50 + args.rsi_trend_buffer
+        momentum_cross = row.rsi_fast_prev <= args.rsi_buy_momentum_level and row.rsi_fast > args.rsi_buy_momentum_level
+        pullback_bounce = row.rsi_prev_low <= args.rsi_buy_pullback_level and row.rsi_fast > row.rsi_fast_prev and row.rsi_fast >= args.rsi_buy_pullback_level
+        return bool(trend_ok and (momentum_cross or pullback_bounce))
+
+    trend_ok = row.rsi_trend <= 50 - args.rsi_trend_buffer
+    momentum_cross = row.rsi_fast_prev >= args.rsi_sell_momentum_level and row.rsi_fast < args.rsi_sell_momentum_level
+    pullback_reject = row.rsi_prev_high >= args.rsi_sell_pullback_level and row.rsi_fast < row.rsi_fast_prev and row.rsi_fast <= args.rsi_sell_pullback_level
+    return bool(trend_ok and (momentum_cross or pullback_reject))
+
+
 def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
     df = add_indicators(load_data(path), args)
     df["ema_overlap_count"] = (
@@ -262,7 +351,7 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
     df["choppy_overlap_count"] = df["choppy_overlap_bar"].shift(1).rolling(args.chop_lookback).sum()
     df["chop_ok"] = df["choppy_overlap_count"] <= args.max_chop_overlap_bars
     trades: list[dict[str, object]] = []
-    counts = {"buy_signals": 0, "sell_signals": 0, "buy_entries": 0, "sell_entries": 0, "ignored": 0}
+    counts = {"buy_signals": 0, "sell_signals": 0, "buy_entries": 0, "sell_entries": 0, "ignored": 0, "rsi_buy_candidates": 0, "rsi_sell_candidates": 0, "rsi_buy_entries": 0, "rsi_sell_entries": 0}
 
     in_pos = False
     side = ""
@@ -333,13 +422,25 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             continue
 
         prev = df.iloc[i - 1]
-        buy_setup = signal_on_bar(prev, args, "BUY")
-        sell_setup = signal_on_bar(prev, args, "SELL")
+        ema_buy_setup = signal_on_bar(prev, args, "BUY")
+        ema_sell_setup = signal_on_bar(prev, args, "SELL")
+        rsi_buy_setup = rsi_signal_on_bar(prev, args, "BUY")
+        rsi_sell_setup = rsi_signal_on_bar(prev, args, "SELL")
+        trade_rsi_buy = args.trade_rsi_setup and rsi_buy_setup and rsi_trade_allowed(timeframe, "BUY", args)
+        trade_rsi_sell = args.trade_rsi_setup and rsi_sell_setup and rsi_trade_allowed(timeframe, "SELL", args)
+        buy_setup = ema_buy_setup or trade_rsi_buy
+        sell_setup = ema_sell_setup or trade_rsi_sell
+        buy_setup_name = "EMA" if ema_buy_setup else "RSI"
+        sell_setup_name = "EMA" if ema_sell_setup else "RSI"
 
-        if buy_setup:
+        if ema_buy_setup:
             counts["buy_signals"] += 1
-        if sell_setup:
+        if ema_sell_setup:
             counts["sell_signals"] += 1
+        if rsi_buy_setup:
+            counts["rsi_buy_candidates"] += 1
+        if rsi_sell_setup:
+            counts["rsi_sell_candidates"] += 1
 
         if not in_session(ts, args.entry_start, args.entry_end):
             if buy_setup or sell_setup:
@@ -358,13 +459,20 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             if risk <= 0:
                 counts["ignored"] += 1
                 continue
-            tp = entry + args.target_points
+            if buy_setup_name == "RSI" and risk > args.max_rsi_risk_points:
+                counts["ignored"] += 1
+                continue
+            trade_target_points = args.rsi_target_points if buy_setup_name == "RSI" else args.target_points
+            tp = entry + trade_target_points
             side = "BUY"
             in_pos = True
             entry_bar = i
             best_move = 0.0
             counts["buy_entries"] += 1
-            open_trade = {"timeframe": timeframe, "side": side, "entry_time": ts, "entry": entry, "initial_sl": sl, "target": tp, "risk": risk, "ema_fast": row.ema_fast, "ema_mid": row.ema_mid, "ema_slow": row.ema_slow, "reason": "EMA34 dynamic support retest with bullish rejection"}
+            if buy_setup_name == "RSI":
+                counts["rsi_buy_entries"] += 1
+            reason = "EMA34 dynamic support retest with bullish rejection" if buy_setup_name == "EMA" else "RSI50 bullish bias with RSI10 momentum/pullback confirmation"
+            open_trade = {"timeframe": timeframe, "setup": buy_setup_name, "side": side, "entry_time": ts, "entry": entry, "initial_sl": sl, "target": tp, "risk": risk, "ema_fast": row.ema_fast, "ema_mid": row.ema_mid, "ema_slow": row.ema_slow, "rsi_fast": row.rsi_fast, "rsi_trend": row.rsi_trend, "reason": reason}
         elif sell_setup and args.side in {"both", "sell"}:
             entry = row.open if args.entry_price == "open" else row.close
             sl = selected_stop("SELL", entry, row, prev, swing_window, args)
@@ -372,13 +480,20 @@ def simulate(timeframe: str, path: Path, args: argparse.Namespace) -> tuple[pd.D
             if risk <= 0:
                 counts["ignored"] += 1
                 continue
-            tp = entry - args.target_points
+            if sell_setup_name == "RSI" and risk > args.max_rsi_risk_points:
+                counts["ignored"] += 1
+                continue
+            trade_target_points = args.rsi_target_points if sell_setup_name == "RSI" else args.target_points
+            tp = entry - trade_target_points
             side = "SELL"
             in_pos = True
             entry_bar = i
             best_move = 0.0
             counts["sell_entries"] += 1
-            open_trade = {"timeframe": timeframe, "side": side, "entry_time": ts, "entry": entry, "initial_sl": sl, "target": tp, "risk": risk, "ema_fast": row.ema_fast, "ema_mid": row.ema_mid, "ema_slow": row.ema_slow, "reason": "EMA34 dynamic resistance retest with bearish rejection"}
+            if sell_setup_name == "RSI":
+                counts["rsi_sell_entries"] += 1
+            reason = "EMA34 dynamic resistance retest with bearish rejection" if sell_setup_name == "EMA" else "RSI50 bearish bias with RSI10 momentum/pullback confirmation"
+            open_trade = {"timeframe": timeframe, "setup": sell_setup_name, "side": side, "entry_time": ts, "entry": entry, "initial_sl": sl, "target": tp, "risk": risk, "ema_fast": row.ema_fast, "ema_mid": row.ema_mid, "ema_slow": row.ema_slow, "rsi_fast": row.rsi_fast, "rsi_trend": row.rsi_trend, "reason": reason}
 
     return df, pd.DataFrame(trades), counts
 
@@ -453,7 +568,7 @@ def trade_rows(trades: pd.DataFrame, recent: int, best: bool = False) -> list[di
     rows = []
     data = trades.sort_values(["pnl", "profit_risk_multiple"], ascending=[False, False]).head(recent) if best else trades.sort_values("exit_time").tail(recent)
     for row in data.itertuples():
-        rows.append({"Side": row.side, "EntryTime": row.entry_time, "Entry": row.entry, "RiskPts": row.risk, "SL": row.initial_sl, "Target": row.target, "BestMovePts": row.best_move, "ExitTime": row.exit_time, "Exit": row.exit, "PnL": row.pnl, "ProfitRiskMultiple": row.profit_risk_multiple, "Bars": row.bars, "ExitType": row.exit_type})
+        rows.append({"Setup": row.setup, "Side": row.side, "EntryTime": row.entry_time, "Entry": row.entry, "RiskPts": row.risk, "SL": row.initial_sl, "Target": row.target, "BestMovePts": row.best_move, "ExitTime": row.exit_time, "Exit": row.exit, "PnL": row.pnl, "ProfitRiskMultiple": row.profit_risk_multiple, "Bars": row.bars, "ExitType": row.exit_type})
     return rows
 
 
@@ -481,6 +596,15 @@ def config_rows(args: argparse.Namespace) -> list[dict[str, object]]:
         {"Setting": "Volume Filter", "Value": args.use_volume_filter},
         {"Setting": "Min Volume Mult", "Value": args.min_volume_mult},
         {"Setting": "Close Break Filter", "Value": args.entry_on_rejection_break},
+        {"Setting": "RSI Setup Enabled", "Value": args.use_rsi_setup},
+        {"Setting": "Trade RSI Setup", "Value": args.trade_rsi_setup},
+        {"Setting": "RSI Fast/Trend", "Value": f"{args.rsi_fast_len}/{args.rsi_trend_len}"},
+        {"Setting": "RSI Price Action", "Value": args.rsi_price_action_confirm},
+        {"Setting": "RSI EMA Trend Filter", "Value": args.rsi_use_ema_trend_filter},
+        {"Setting": "RSI Target Points", "Value": args.rsi_target_points},
+        {"Setting": "Max RSI Risk Points", "Value": args.max_rsi_risk_points},
+        {"Setting": "RSI Trade Side", "Value": args.rsi_trade_side},
+        {"Setting": "RSI Min Trade TF Minutes", "Value": args.rsi_min_trade_timeframe_minutes},
         {"Setting": "Chop Filter", "Value": args.use_chop_filter},
         {"Setting": "Chop Lookback", "Value": args.chop_lookback},
         {"Setting": "Chop Min EMA Overlaps", "Value": args.chop_min_ema_overlaps},
@@ -511,6 +635,8 @@ def run(args: argparse.Namespace) -> None:
         print(f"\n=== {timeframe} | EMA {args.fast_ema}/{args.mid_ema}/{args.slow_ema} Bounce ===")
         print(f"Data: {df.datetime.min()} -> {df.datetime.max()} | bars={len(df)}")
         print(f"Signals: buy={counts['buy_signals']} sell={counts['sell_signals']} | Entries: buy={counts['buy_entries']} sell={counts['sell_entries']} | Ignored={counts['ignored']}")
+        if args.use_rsi_setup:
+            print(f"RSI Candidates: buy={counts['rsi_buy_candidates']} sell={counts['rsi_sell_candidates']} | RSI Entries: buy={counts['rsi_buy_entries']} sell={counts['rsi_sell_entries']} | Trading={'on' if args.trade_rsi_setup else 'off'}")
         if not trades.empty:
             print_table(f"{timeframe} By Side", group_rows(trades, "side", "Side"))
             print_table(f"{timeframe} By Entry Hour", group_rows(trades.assign(hour=trades["entry_time"].dt.hour), "hour", "Hour"))
@@ -561,6 +687,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-volume-mult", type=float, default=0.9)
     parser.add_argument("--entry-on-rejection-break", type=bool_arg, default=False)
     parser.add_argument("--close-break-range-pct", type=float, default=0.25)
+    parser.add_argument("--use-rsi-setup", type=bool_arg, default=False)
+    parser.add_argument("--trade-rsi-setup", type=bool_arg, default=False)
+    parser.add_argument("--rsi-fast-len", type=int, default=10)
+    parser.add_argument("--rsi-trend-len", type=int, default=50)
+    parser.add_argument("--rsi-trend-buffer", type=float, default=5.0)
+    parser.add_argument("--rsi-buy-momentum-level", type=float, default=60.0)
+    parser.add_argument("--rsi-buy-pullback-level", type=float, default=40.0)
+    parser.add_argument("--rsi-sell-momentum-level", type=float, default=40.0)
+    parser.add_argument("--rsi-sell-pullback-level", type=float, default=60.0)
+    parser.add_argument("--rsi-retest-bars", type=int, default=3)
+    parser.add_argument("--rsi-breakout-lookback", type=int, default=3)
+    parser.add_argument("--rsi-breakout-buffer", type=float, default=0.0)
+    parser.add_argument("--rsi-price-action-confirm", choices=["none", "breakout", "rejection", "either"], default="breakout")
+    parser.add_argument("--rsi-use-ema-trend-filter", type=bool_arg, default=True)
+    parser.add_argument("--rsi-target-points", type=float, default=30.0)
+    parser.add_argument("--max-rsi-risk-points", type=float, default=20.0)
+    parser.add_argument("--rsi-trade-side", choices=["both", "buy", "sell"], default="sell")
+    parser.add_argument("--rsi-min-trade-timeframe-minutes", type=int, default=5)
     parser.add_argument("--use-bos-filter", type=bool_arg, default=False, help=argparse.SUPPRESS)
     parser.add_argument("--bos-lookback", type=int, default=5, help=argparse.SUPPRESS)
     parser.add_argument("--use-chop-filter", type=bool_arg, default=True)
