@@ -42,3 +42,7 @@ only checks 5 candles
 candle must touch all 3 EMAs to count as choppy
 so fewer candles are marked choppy
 That is why your profitable trade stayed.
+
+Command:
+
+C:\Users\Vidya sagar\OneDrive\Desktop\myscripts\NiftyMA\Strategy\MA>python .\EMA_14_34_90_Bounce_Backtest.py --timeframes 1m 5m --target-points 50 --use-bos-filter false --use-chop-filter false --chop-lookback 5 --chop-min-ema-overlaps 3 --max-chop-overlap-bars 2 --use-rsi-setup true --trade-rsi-setup true --use-smc-setup true --trade-smc-setup true --ema-buy-entry-start 9:15 --ema-buy-entry-end 15:30 --rsi-entry-start 9:15 --rsi-entry-end 15:30 --smc-entry-start 9:15 --smc-entry-end 15:30 --smc-trade-side sell --min-ema-buy-risk-points 10 --min-smc-risk-points 16 --rsi-avoid-displacement-candle true --recent 40 --best-trades 40

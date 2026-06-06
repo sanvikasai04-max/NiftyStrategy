@@ -58,7 +58,15 @@ def color_text(value: str, color: str) -> str:
 def load_data(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Missing CSV: {path}")
-    df = pd.read_csv(path, parse_dates=["datetime"])
+    df = pd.read_csv(path)
+    if "datetime" not in df.columns:
+        raise ValueError(f"CSV must contain a datetime column: {path}")
+    original_datetime = df["datetime"].copy()
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", dayfirst=True)
+    bad_datetime = df["datetime"].isna()
+    if bad_datetime.any():
+        examples = ", ".join(original_datetime.loc[bad_datetime].astype(str).head(3).tolist())
+        raise ValueError(f"Could not parse datetime values in {path}: {examples}")
     df = df.sort_values("datetime").reset_index(drop=True)
     for col in ["open", "high", "low", "close", "volume"]:
         if col in df.columns:
